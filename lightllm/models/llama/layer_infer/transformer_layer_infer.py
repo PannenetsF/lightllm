@@ -69,6 +69,9 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
         elif "triton_gqa_flashdecoding" in self.mode:
             self._token_attention_kernel = partial(LlamaTransformerLayerInfer._token_decode_attention_gqa_flashdecoding, self)
             self._copy_kv_to_mem_cache = partial(LlamaTransformerLayerInfer._copy_kv_to_mem_cache_normal, self)
+        elif "triton_bib_mha_decoding" in self.mode:
+            self._token_attention_kernel = partial(LlamaTransformerLayerInfer._token_decode_attention_bib_mha_decoding, self)
+            self._copy_kv_to_mem_cache = partial(LlamaTransformerLayerInfer._copy_kv_to_mem_cache_normal, self)
         else:
             self._token_attention_kernel = partial(LlamaTransformerLayerInfer._token_decode_attention_normal, self)
             self._copy_kv_to_mem_cache = partial(LlamaTransformerLayerInfer._copy_kv_to_mem_cache_normal, self)
@@ -360,3 +363,17 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
         cache_k = infer_state.mem_manager.key_buffer[self.layer_num_]
         cache_v = infer_state.mem_manager.value_buffer[self.layer_num_]
         return token_decode_attention_flash_decoding(q, infer_state, self.tp_q_head_num_, self.head_dim_, cache_k, cache_v, out=out)
+
+    def _token_decode_attention_bib_mha_decoding(self, q, infer_state: LlamaInferStateInfo, layer_weight, out=None):
+        from lightllm.models.llama.triton_kernel.bib_mha_decoding import bib_decoding
+        cache_k = infer_state.mem_manager.key_buffer[self.layer_num_]
+        cache_v = infer_state.mem_manager.value_buffer[self.layer_num_]
+
+        return bib_decoding(
+            q_tensor=q.view(-1, self.tp_q_head_num_, self.head_dim_),
+            k_tensor=cache_k,
+            v_tensor=cache_v,
+            score_tensor=out,
+            infer_state=infer_state,
+            sm_scale=1.0/(self.head_dim_**0.5),
+        )
