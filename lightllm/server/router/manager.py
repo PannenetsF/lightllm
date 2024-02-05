@@ -15,7 +15,7 @@ from rpyc.utils.classic import obtain
 from lightllm.utils.infer_utils import calculate_time
 from ..io_struct import BatchTokenIdOut, AbortReq, ReqRunStatus, FinishStatus
 from .stats import Stats
-from .pause_strategy import Fcfs, select_paused_reqs
+from .pause_strategy import Fcfs, select_paused_reqs, BiBSlot
 from ..tokenizer import get_tokenizer
 from lightllm.utils.log_utils import init_logger
 
@@ -53,6 +53,16 @@ class RouterManager:
             self.tokenizer = get_tokenizer(self.model_weightdir, args.tokenizer_mode, args.trust_remote_code)
 
         self.stats_tool = Stats(not args.disable_log_stats, args.log_stats_interval)
+
+        self.is_bib_route_mode = args.bib_route_mode
+        if self.is_bib_route_mode:
+            self.bib_slot_size = args.bib_slot_size
+            from .route_statistics import BibStatistics
+            self.bib_statistics = BibStatistics(args.bib_statistics)
+            self.bib_pause_strategy = BiBSlot(self.bib_slot_size)
+        else:
+            self.bib_slot_size = None
+
         return
 
     async def wait_to_model_ready(self):
@@ -124,7 +134,7 @@ class RouterManager:
                                prompt_cache_len, prompt_cache_req_id, self.splitfuse_block_size)
         else:
             req = NormalReq(request_id, prompt_ids, sampling_params, multimodal_params, 
-                            prompt_cache_len, prompt_cache_req_id)
+                            prompt_cache_len, prompt_cache_req_id, bib_slot_size=self.bib_slot_size)
         self.req_queue.append(req)
         self.send_to_detokenization.send_pyobj(req.to_req_detokenization_state())
         return
@@ -145,6 +155,8 @@ class RouterManager:
             await self._step()
             counter_count += 1
             if self.running_batch is not None:
+                if self.is_bib_route_mode:
+                    self.bib_statistics.add(self.running_batch)
                 if counter_count % 50 == 0:
                     total_used_tokens = self.prompt_cache_used_tokens + self.running_batch.batch_used_tokens + self.req_queue.pause_req_used_tokens
                     token_ratio = total_used_tokens / self.max_total_token_num
@@ -250,6 +262,12 @@ class RouterManager:
         self._update_out_status_to_batch(batch, req_to_out_status)
         return
 
+    async def _select_bib_batch(self):
+        slot_reqs = self.running_batch.mark_slot_bounded_req(self.bib_slot_size)
+        if len(slot_reqs) > 0:
+            slot_reqs = select_paused_reqs(self.running_batch, self.bib_pause_strategy, self.req_queue, self.max_total_token_num)
+            await self._pause_reqs(self.running_batch, slot_reqs)
+
     async def _decode_batch(self, batch:Batch):
         rets = [self.model_rpcs[tp_rank].decode_batch(batch.batch_id) for tp_rank in range(self.world_size)]
         ans = await asyncio.gather(*rets)
@@ -263,6 +281,8 @@ class RouterManager:
         self._send_to_detokenization_proc(batch, req_to_out_status)
         batch.filter_out_finished_req(unfinished_req_ids, finished_req_ids)
         await self._handle_finish_req(batch, unfinished_req_ids, finished_req_ids)
+        if self.is_bib_route_mode:
+            await self._select_bib_batch()
         return
 
     async def _filter_batch(self, batch: Batch, unfinished_req_ids, finished_req_ids: List):
@@ -313,7 +333,7 @@ class RouterManager:
         batch.batch_used_tokens = new_batch_used_tokens
         batch.batch_decode_need_tokens = new_batch_decode_need_tokens
         return
-    
+
     def _update_out_status_to_batch(self, batch: Batch, req_to_out_status):
         new_batch_used_tokens = 0
         new_batch_decode_need_tokens = 0 # 只有在 splitfuse 模式下有意义
@@ -392,4 +412,8 @@ def start_router_process(args, router_port, detokenization_port, model_rpc_ports
     asyncio.set_event_loop(loop)
     loop.create_task(router.loop_for_fwd())
     loop.run_until_complete(router.loop_for_netio_req())
+
+    if router.bib_statistics:
+        router.bib_statistics.save()
+
     return

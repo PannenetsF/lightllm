@@ -96,8 +96,10 @@ class Req:
         raise Exception("need to impl")
 
 class NormalReq(Req):
-    def __init__(self, request_id, prompt_ids, sample_params: SamplingParams, multimodal_params: MultimodalParams, prompt_cache_len=0, prompt_cache_req_id=None):
+    def __init__(self, request_id, prompt_ids, sample_params: SamplingParams, multimodal_params: MultimodalParams, prompt_cache_len=0, prompt_cache_req_id=None, bib_slot_size=None):
         super().__init__(request_id, prompt_ids, sample_params, multimodal_params, prompt_cache_len, prompt_cache_req_id)
+        if bib_slot_size:
+            self.bib_slot_size = bib_slot_size
         return
     
     def get_tuple_tokens(self, is_busy, router_max_new_token_len):
@@ -251,7 +253,22 @@ class Batch:
                 unfinished_req_ids.append(req.request_id)
     
         return unfinished_req_ids, finished_req_ids
-    
+
+    def mark_slot_bounded_req(self, slot_size):
+        bounded_req_ids = []
+        for req in self.reqs:
+            if req.stop_sequences_matched():
+                continue
+            if len(req.output_ids) and len(req.output_ids) % slot_size == 0:
+                bounded_req_ids.append(req.request_id)
+        return bounded_req_ids
+
+    def reenqueue_slot_requests(self, ids, offload):
+        for request_id in ids:
+            req = self.pop_req(request_id) if not offload else self.offload(request_id)
+            assert req is not None
+            self.req_queue.insert(req)
+
     def filter_out_finished_req(self, unfinished_req_ids, finished_req_ids):
         # update batch
         if len(finished_req_ids) != 0:

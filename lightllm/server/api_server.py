@@ -41,7 +41,7 @@ from .httpserver.manager import HttpServerManager
 from .detokenization.manager import start_detokenization_process
 from .router.manager import start_router_process
 from .embed_cache.manager import start_cache_manager
-from .visualserver.manager import start_visual_process
+# from .visualserver.manager import start_visual_process
 from .req_id_generator import ReqIDGenerator
 
 from lightllm.utils.net_utils import alloc_can_use_network_port
@@ -375,7 +375,14 @@ def main():
                         None : raise Exception 
                         head : remove some head tokens to make input token len <= max_req_input_len
                         center : remove some tokens in center loc to make input token len <= max_req_input_len""")
-    
+    parser.add_argument("--bib_route_mode", action="store_true",
+                        help="use bib route mode. If use this mode, you are encouraged to set "
+                             "--mode triton_bib_mha_decoding")
+    parser.add_argument("--bib_slot_size", type=int, default=378,
+                        help="bib slot size")
+    parser.add_argument("--bib_statistics", type=str, default=None,
+                        help="bib statistics dump path")
+
     args = parser.parse_args()
 
     # 非splitfuse 模式，不支持 prompt cache 特性

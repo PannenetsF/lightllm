@@ -37,6 +37,15 @@ class Hrnn(Strategy):
         reqs = [req for req in batch.reqs]
         return sorted(reqs, key=lambda req: (req.input_len + req.max_output_len - len(req.output_ids)) / req.input_len, reverse=True)
 
+class BiBSlot(Strategy):
+
+        def __init__(self, slot_size) -> None:
+            super().__init__()
+            self.slot_size = slot_size
+
+        def ordering_reqs(self, batch: Batch):
+            reqs = [req for req in batch.reqs]
+            return sorted(reqs, key=lambda req: req.bib_slot_size - len(req.output_ids) % req.bib_slot_size, reverse=True)
 
 def select_paused_reqs(batch: Batch, strategy: Strategy, req_queue: ReqQueue, max_total_token_num):
     reqs = strategy.ordering_reqs(batch)
@@ -45,7 +54,7 @@ def select_paused_reqs(batch: Batch, strategy: Strategy, req_queue: ReqQueue, ma
 
     pause_req.req_status = ReqRunStatus.PAUSED_AND_OFFLOAD
     pause_req.cur_kv_len = 0
-    
+
     req_queue.back_to_wait_list([pause_req])
 
     return [pause_req]

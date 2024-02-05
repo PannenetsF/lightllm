@@ -23,6 +23,10 @@ class ReqQueue:
         self.is_splitfuse_mode = args.splitfuse_mode
         self.splitfuse_block_size = args.splitfuse_block_size
 
+        self.is_bib_route_mode = args.bib_route_mode
+        if self.is_bib_route_mode:
+            self.router_max_new_token_len = args.bib_slot_size
+
         # 当使用 prompt cache 特性时的维护变量
         self.prompt_cache_used_tokens = prompt_cache_used_tokens
         self.prompt_cache_req_num = prompt_cache_req_num
