@@ -1,3 +1,4 @@
+import math
 import torch
 import numpy as np
 from lightllm.common.basemodel import InferStateInfo
@@ -9,6 +10,13 @@ class LlamaInferStateInfo(InferStateInfo):
         self.position_cos = None
         self.position_sin = None
         self.other_kv_index = None
+
+        self.req_to_block = None
+        self.block_to_batch = None
+        self.block_to_start = None
+        self.s_max = None
+        self.s_exp_sum = None
+        self.s_exp_v_sum = None
     
     def init_some_extra_state(self, model, input_ids : torch.Tensor):
         if self.is_prefill:
@@ -25,3 +33,42 @@ class LlamaInferStateInfo(InferStateInfo):
             self.other_kv_index = self.req_manager.req_to_token_indexs[self.b_req_idx[0], 0].item()
             # b_loc[0, max_len_in_batch - 1].item()
         return
+
+    def init_bib_extra_state(self, q, chunk_size):
+        if self.req_to_block is not None:
+            return
+        else:
+            k_length = self.b_seq_len
+            k_start = self.b_start_loc
+            batch_size, H, h = q.shape
+            chunk_size = chunk_size
+            chunk_num = math.floor((k_length.max() + chunk_size - 1) / chunk_size)
+
+            blocks = (k_length / chunk_size).ceil().int()
+            total_blocks = blocks.sum().item()
+            max_blocks = blocks.max().item()
+            block_to_request = np.zeros((total_blocks,), dtype=np.int32)
+            block_to_start = np.zeros((total_blocks,), dtype=np.int32)
+            request_to_block = np.zeros((batch_size, max_blocks), dtype=np.int32) - 1
+
+            _arange = np.arange(total_blocks)
+            block_idx = 0
+            for req_idx, (leng, start) in enumerate(zip(k_length.tolist(), k_start.tolist())):
+                block_num = math.ceil(leng / chunk_size)
+                block_to_start[block_idx:block_idx + block_num] = _arange[:block_num]
+                block_to_request[block_idx:block_idx + block_num] = req_idx
+                request_to_block[req_idx, :block_num] = _arange[block_idx: block_idx + block_num]
+                block_idx += block_num
+
+            block_to_start = torch.from_numpy(block_to_start).cuda()
+            block_to_request = torch.from_numpy(block_to_request).cuda()
+            request_to_block = torch.from_numpy(request_to_block).cuda()
+
+            self.req_to_block = request_to_block
+            self.block_to_batch = block_to_request
+            self.block_to_start = block_to_start
+
+            self.s_max = torch.empty((total_blocks, H), dtype=torch.float32, device=q.device)
+            self.s_exp_sum = torch.empty((total_blocks, H), dtype=torch.float32, device=q.device)
+            self.s_exp_v_sum = torch.empty((total_blocks, H, h), dtype=torch.float32, device=q.device)
+            return
