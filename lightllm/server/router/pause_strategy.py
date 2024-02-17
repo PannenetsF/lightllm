@@ -1,7 +1,7 @@
 import uuid
 import numpy as np
 from typing import List, Tuple
-from lightllm.server.io_struct import Batch, Req
+from lightllm.server.io_struct import Batch, Req, BibReq
 from lightllm.server.router.req_queue import ReqQueue
 from lightllm.server.io_struct import ReqRunStatus
 
@@ -36,6 +36,15 @@ class Hrnn(Strategy):
     def ordering_reqs(self, batch: Batch):
         reqs = [req for req in batch.reqs]
         return sorted(reqs, key=lambda req: (req.input_len + req.max_output_len - len(req.output_ids)) / req.input_len, reverse=True)
+
+
+class BibPause(Strategy):
+    def __init__(self) -> None:
+        super().__init__()
+
+    def ordering_reqs(self, batch: Batch):
+        reqs = [req for req in batch.reqs]
+        return sorted(reqs, key=lambda req: req.bib_size - len(req.output_ids) % req.bib_size, reverse=True)
 
 
 def select_paused_reqs(batch: Batch, strategy: Strategy, req_queue: ReqQueue, max_total_token_num):

@@ -1,6 +1,8 @@
 import math
 import torch
 import numpy as np
+import triton
+
 from lightllm.common.basemodel import InferStateInfo
 from lightllm.common.req_manager import ReqManager
 
@@ -17,7 +19,10 @@ class LlamaInferStateInfo(InferStateInfo):
         self.s_max = None
         self.s_exp_sum = None
         self.s_exp_v_sum = None
-    
+        self.hidden = None
+        self.sm_scale = None
+        self.head = None
+
     def init_some_extra_state(self, model, input_ids : torch.Tensor):
         if self.is_prefill:
             b_seq_len_numpy = self.b_seq_len.cpu().numpy()
@@ -34,7 +39,7 @@ class LlamaInferStateInfo(InferStateInfo):
             # b_loc[0, max_len_in_batch - 1].item()
         return
 
-    def init_bib_extra_state(self, q, chunk_size):
+    def init_bib_extra_state(self, q, k, chunk_size):
         if self.req_to_block is not None:
             return
         else:
@@ -63,6 +68,16 @@ class LlamaInferStateInfo(InferStateInfo):
             block_to_start = torch.from_numpy(block_to_start).cuda()
             block_to_request = torch.from_numpy(block_to_request).cuda()
             request_to_block = torch.from_numpy(request_to_block).cuda()
+
+            self.kv_group_num = q.shape[1] // k.shape[1]
+
+            self.hidden = h
+            self.head = H
+            self.sm_scale = 1.0 / (h ** 0.5)
+            self.batch_size = batch_size
+            self.num_block = total_blocks
+            self.max_blocks = (self.b_seq_len.max() / chunk_size).ceil().int().item()
+            self.max_blocks_round = triton.next_power_of_2(self.max_blocks)
 
             self.req_to_block = request_to_block
             self.block_to_batch = block_to_request

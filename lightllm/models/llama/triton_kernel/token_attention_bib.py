@@ -84,7 +84,9 @@ def _bib_reduce_kernel(
         stride_att_out_blk, stride_att_out_h, stride_att_out_d,
         BATCH_SIZE: tl.constexpr,
         BLOCK_DMODEL: tl.constexpr,
+        TOTAL_N_BLOCK_ROUND: tl.constexpr,
         TOTAL_N_BLOCK: tl.constexpr
+
 ):
     cur_batch = tl.program_id(0)
     cur_head = tl.program_id(1)
@@ -92,7 +94,7 @@ def _bib_reduce_kernel(
     if cur_batch > BATCH_SIZE:
         return
 
-    chunk_off = tl.arange(0, TOTAL_N_BLOCK)
+    chunk_off = tl.arange(0, TOTAL_N_BLOCK_ROUND)
     dim_off = tl.arange(0, BLOCK_DMODEL)
 
     block_idx = tl.load(Req_to_block + cur_batch * stride_req_to_block_b + chunk_off * stride_req_to_block_s,
@@ -130,11 +132,11 @@ def token_attention_bib(
     if attn_out is None:
         attn_out = torch.empty_like(q)
 
-    infer_state.init_bib_extra_state(q, bib_chunk_size)
+    infer_state.init_bib_extra_state(q, k, bib_chunk_size)
     BLOCK_N = 64
-    hidden = q.shape[-1]
-    sm_scale = 1.0 / (hidden ** 0.5)
 
+    hidden = infer_state.hidden
+    sm_scale = infer_state.sm_scale
     Req_to_tokens = infer_state.req_manager.req_to_token_indexs
     Req_to_block = infer_state.req_to_block
     B_req_idx = infer_state.b_req_idx
@@ -142,12 +144,13 @@ def token_attention_bib(
     Block_to_batch = infer_state.block_to_batch
     Block_to_start = infer_state.block_to_start
     s_max, s_exp_sum, s_exp_v_sum = infer_state.s_max, infer_state.s_exp_sum, infer_state.s_exp_v_sum
-    batch = B_req_idx.shape[0]
-    num_block = Block_to_batch.shape[0]
-    max_blocks = (B_seq_len.max() / bib_chunk_size).ceil().int().item()
-    head = q.shape[1]
+    batch = infer_state.batch_size
+    num_block = infer_state.num_block
+    max_blocks = infer_state.max_blocks
+    max_blocks_round = infer_state.max_blocks_round
+    head = infer_state.head
+    kv_group_num = infer_state.kv_group_num
 
-    kv_group_num = q.shape[1] // v.shape[1]
     return token_attention_bib_raw(
         q, k, v, sm_scale,
         Req_to_tokens, Req_to_block, B_req_idx, B_seq_len,
@@ -156,7 +159,7 @@ def token_attention_bib(
         attn_out,
         batch,
         kv_group_num, head,
-        BLOCK_N, hidden, max_blocks, num_block
+        BLOCK_N, hidden, max_blocks, num_block, max_blocks_round
     )
 
 
@@ -168,7 +171,7 @@ def token_attention_bib_raw(
         attn_out,
         batch,
         kv_group_num, head,
-        BLOCK_N, hidden, max_blocks, num_block
+        BLOCK_N, hidden, max_blocks, num_block, max_blocks_round
 ):
     grid = (num_block, head)
 
@@ -188,6 +191,7 @@ def token_attention_bib_raw(
         BLOCK_N=BLOCK_N,
     )
 
+    # max_blocks_round = triton.next_power_of_2(max_blocks)
     grid = (batch, head)
     _bib_reduce_kernel[grid](
         Req_to_block,
@@ -200,6 +204,7 @@ def token_attention_bib_raw(
         attn_out.stride(0), attn_out.stride(1), attn_out.stride(2),
         BATCH_SIZE=batch,
         BLOCK_DMODEL=hidden,
+        TOTAL_N_BLOCK_ROUND=max_blocks_round,
         TOTAL_N_BLOCK=max_blocks,
     )
 
@@ -384,4 +389,6 @@ def align_attention_inter(lengths):
 if __name__ == '__main__':
     torch.manual_seed(0)
     torch.cuda.manual_seed(0)
-    align_attention_inter([7])
+    for i in range(7, 400):
+        print('length', i)
+        align_attention_inter([i])

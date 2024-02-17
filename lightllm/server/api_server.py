@@ -375,7 +375,12 @@ def main():
                         None : raise Exception 
                         head : remove some head tokens to make input token len <= max_req_input_len
                         center : remove some tokens in center loc to make input token len <= max_req_input_len""")
-    
+    parser.add_argument("--bib_route", action='store_true',
+                        help="use bib route")
+    parser.add_argument("--bib_size", type=int, default=256,
+                        help="bib size")
+    parser.add_argument("--bib_strategy_name", type=str, default=None,
+                        help="the bib strategy name to determine bib size")
     args = parser.parse_args()
 
     # 非splitfuse 模式，不支持 prompt cache 特性

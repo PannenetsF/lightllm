@@ -7,7 +7,7 @@ import zmq
 import zmq.asyncio
 from typing import Dict, List, Optional
 from ..sampling_params import SamplingParams
-from ..io_struct import Req, NormalReq, SplitFuseReq, Batch
+from ..io_struct import Req, NormalReq, SplitFuseReq, Batch, BibReq
 from ..multimodal_params import MultimodalParams
 from .model_infer.model_rpc import start_model_process, ModelRpcClient
 from .req_queue import ReqQueue
@@ -15,7 +15,7 @@ from rpyc.utils.classic import obtain
 from lightllm.utils.infer_utils import calculate_time
 from ..io_struct import BatchTokenIdOut, AbortReq, ReqRunStatus, FinishStatus
 from .stats import Stats
-from .pause_strategy import Fcfs, select_paused_reqs
+from .pause_strategy import Fcfs, select_paused_reqs, BibPause
 from ..tokenizer import get_tokenizer
 from lightllm.utils.log_utils import init_logger
 
@@ -49,9 +49,14 @@ class RouterManager:
         self.is_splitfuse_mode = args.splitfuse_mode
         self.splitfuse_block_size = args.splitfuse_block_size
 
+        self.is_bib_mode = args.bib_route
+        self.bib_size = args.bib_size
+
         if self.is_splitfuse_mode and len(args.prompt_cache_strs) != 0:
             self.tokenizer = get_tokenizer(self.model_weightdir, args.tokenizer_mode, args.trust_remote_code)
-
+        elif self.is_bib_mode and self.bib_size > 1:
+            self.bib_strategy = args.bib_strategy_name
+            self.pause_strategy = BibPause()
         self.stats_tool = Stats(not args.disable_log_stats, args.log_stats_interval)
         return
 
@@ -122,6 +127,9 @@ class RouterManager:
         if self.is_splitfuse_mode:
             req = SplitFuseReq(request_id, prompt_ids, sampling_params, multimodal_params, 
                                prompt_cache_len, prompt_cache_req_id, self.splitfuse_block_size)
+        elif self.is_bib_mode:
+            req = BibReq(request_id, prompt_ids, sampling_params, multimodal_params,
+                         prompt_cache_len, prompt_cache_req_id, self.bib_strategy, self.bib_size)
         else:
             req = NormalReq(request_id, prompt_ids, sampling_params, multimodal_params, 
                             prompt_cache_len, prompt_cache_req_id)

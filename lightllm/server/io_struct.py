@@ -192,6 +192,58 @@ class SplitFuseReq(Req):
         else:
             assert False, "error state"
 
+class BibReq(Req):
+    def __init__(self, request_id, prompt_ids, sample_params: SamplingParams, multimodal_params: MultimodalParams,
+                 prompt_cache_len=0, prompt_cache_req_id=None, bib_stragety=None, bib_size=300):
+        super().__init__(request_id, prompt_ids, sample_params, multimodal_params, prompt_cache_len,
+                         prompt_cache_req_id)
+        self._init_bib_config(bib_stragety, prompt_ids, bib_size)
+        return
+
+    def _init_bib_config(self, bib_stragety, prompt_ids, bib_size):
+        self.bib_stragety = bib_stragety
+        if bib_stragety is None:
+            self.bib_size = bib_size
+        else:
+            raise NotImplemented
+
+    def get_tuple_tokens(self, is_busy, router_max_new_token_len):
+        """
+        普通continues batch调度模式, 先prefill 后 decode 的估计方式 的实现
+        """
+        has_out_len = len(self.output_ids)
+        if self.req_status == ReqRunStatus.RUNNING:
+            return (
+            self.input_len + has_out_len - self.prompt_cache_len, max(0, self.bib_size - has_out_len % self.bib_size - 1))
+        elif self.req_status == ReqRunStatus.WAIT_IN_QUEUE:
+            return (self.input_len + 1 - self.prompt_cache_len, max(0, self.bib_size - 1 - 1))
+        elif self.req_status == ReqRunStatus.PAUSED_AND_OFFLOAD:
+            return (self.input_len + has_out_len + 1 - self.prompt_cache_len,
+                    max(0, self.bib_size - has_out_len % self.bib_size - 1 - 1))
+        elif self.req_status == ReqRunStatus.PAUSED_AND_KVKEEP:
+            return (
+            self.input_len + has_out_len - self.prompt_cache_len, max(0, self.bib_size - has_out_len % self.bib_size - 1))
+        else:
+            assert False, "error state"
+        return
+
+    def get_decode_need_tokens(self):
+        if self.req_status == ReqRunStatus.RUNNING:
+            return 1
+        else:
+            assert False, "error state"
+
+    def get_first_router_need_tokens(self):
+        if self.req_status == ReqRunStatus.WAIT_IN_QUEUE:
+            return self.input_len
+        elif self.req_status == ReqRunStatus.PAUSED_AND_OFFLOAD:
+            return self.input_len + len(self.output_ids)
+        elif self.req_status == ReqRunStatus.PAUSED_AND_KVKEEP:
+            return 0
+        else:
+            assert False, "error state"
+
+
 class ReqDetokenizationState:
     def __init__(
         self,
@@ -281,7 +333,7 @@ class Batch:
     def __repr__(self):
         return (f"batch_id={self.batch_id}, "
                 f"reqs={self.reqs}, ")
-        
+
 class BatchTokenIdOut:
     def __init__(self):
         self.reqs_infs: List[Tuple[str, int, Dict, int]] = []  # [req_id, new_token_id, gen_metadata, finish_status]
