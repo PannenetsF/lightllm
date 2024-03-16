@@ -72,7 +72,7 @@ def _bib_qkv_kernel(
     tl.store(S_exp_v_sum + s_exp_v_sum_off, s_exp_v_sum)
 
 
-@triton.jit
+@triton.jit(do_not_specialize=[19])
 def _bib_reduce_kernel(
         Req_to_block,
         S_max, S_exp_sum, S_exp_v_sum,
@@ -82,17 +82,14 @@ def _bib_reduce_kernel(
         stride_s_exp_sum_blk, stride_s_exp_sum_h,
         stride_s_exp_v_sum_blk, stride_s_exp_v_sum_h, stride_s_exp_v_sum_d,
         stride_att_out_blk, stride_att_out_h, stride_att_out_d,
-        BATCH_SIZE: tl.constexpr,
+        # BATCH_SIZE: tl.constexpr,
         BLOCK_DMODEL: tl.constexpr,
         TOTAL_N_BLOCK_ROUND: tl.constexpr,
-        TOTAL_N_BLOCK: tl.constexpr
+        TOTAL_N_BLOCK,
 
 ):
     cur_batch = tl.program_id(0)
     cur_head = tl.program_id(1)
-
-    if cur_batch > BATCH_SIZE:
-        return
 
     chunk_off = tl.arange(0, TOTAL_N_BLOCK_ROUND)
     dim_off = tl.arange(0, BLOCK_DMODEL)
@@ -189,6 +186,7 @@ def token_attention_bib_raw(
         kv_group_num,
         BLOCK_DMODEL=hidden,
         BLOCK_N=BLOCK_N,
+        num_warps=BLOCK_N // 32,
     )
 
     # max_blocks_round = triton.next_power_of_2(max_blocks)
@@ -202,7 +200,7 @@ def token_attention_bib_raw(
         s_exp_sum.stride(0), s_exp_sum.stride(1),
         s_exp_v_sum.stride(0), s_exp_v_sum.stride(1), s_exp_v_sum.stride(2),
         attn_out.stride(0), attn_out.stride(1), attn_out.stride(2),
-        BATCH_SIZE=batch,
+        # BATCH_SIZE=batch,
         BLOCK_DMODEL=hidden,
         TOTAL_N_BLOCK_ROUND=max_blocks_round,
         TOTAL_N_BLOCK=max_blocks,
@@ -221,7 +219,8 @@ def align_attention_inter(lengths):
     k = torch.randn(total_len * 5, H, h).cuda()
     v = torch.randn(total_len * 5, H, h).cuda()
 
-    starts = torch.cat([torch.zeros(1, dtype=torch.long), lengths.cumsum(0)[:-1]]).cuda()
+    starts = torch.cat(
+        [torch.zeros(1, dtype=torch.long), lengths.cumsum(0)[:-1]]).cuda()
     rand_idx = torch.randperm(total_len * 5)[:total_len].cuda()
     max_length = max(lengths)
     used_k = k[rand_idx]
@@ -230,17 +229,21 @@ def align_attention_inter(lengths):
     qk_at = []
     for i in range(batch_size):
         qq = q[i].view(H, 1, h)  # shape (H, h)
-        kk = used_k[starts[i]:starts[i] + lengths[i]]  # shape (lengths[i], H, h)
-        vv = used_v[starts[i]:starts[i] + lengths[i]]  # shape (lengths[i], H, h)
+        kk = used_k[
+             starts[i]:starts[i] + lengths[i]]  # shape (lengths[i], H, h)
+        vv = used_v[
+             starts[i]:starts[i] + lengths[i]]  # shape (lengths[i], H, h)
         qk = torch.einsum('Hlh,LHh->HLl', qq, kk)
         qk = qk / math.sqrt(h)
         qk_at.append(qk.sum((1, 2)))
 
     qk_at = torch.stack(qk_at)
 
-    req_to_token_indexs = torch.zeros(batch_size, max_length, dtype=torch.long).cuda() - 1
+    req_to_token_indexs = torch.zeros(batch_size, max_length,
+                                      dtype=torch.long).cuda() - 1
     for i in range(batch_size):
-        req_to_token_indexs[i, :lengths[i]] = rand_idx[starts[i]:starts[i] + lengths[i]]
+        req_to_token_indexs[i, :lengths[i]] = rand_idx[
+                                              starts[i]:starts[i] + lengths[i]]
 
     blocks = []
 
@@ -259,7 +262,8 @@ def align_attention_inter(lengths):
         block_num = math.ceil(leng / chunk)
         block_to_start[block_idx:block_idx + block_num] = _arange[:block_num]
         block_to_request[block_idx:block_idx + block_num] = req_idx
-        request_to_block[req_idx, :block_num] = _arange[block_idx: block_idx + block_num]
+        request_to_block[req_idx, :block_num] = _arange[
+                                                block_idx: block_idx + block_num]
         block_idx += block_num
 
     # block_to_length = torch.from_numpy(block_to_length).cuda()
@@ -297,11 +301,13 @@ def align_attention_inter(lengths):
             end = min((j + 1) * BLOCK_N, lengths[i])
             qk_blk = qk[:, start:end]
             s_max = qk_blk.max(1).values  # shape (H,)
-            s_exp = (qk_blk - s_max.unsqueeze(1)).exp()  # shape (H, end - start)
+            s_exp = (qk_blk - s_max.unsqueeze(
+                1)).exp()  # shape (H, end - start)
             s_exp_sum = s_exp.sum(1)  # shape (H,)
             vv_blk = vv[start:end]  # shape (end - start, H, h)
             vv_blk = vv_blk.permute(1, 0, 2)  # shape (H, end - start, h)
-            s_exp_v_sum = torch.bmm(s_exp.unsqueeze(1), vv_blk).squeeze(1)  # shape (H, h)
+            s_exp_v_sum = torch.bmm(s_exp.unsqueeze(1), vv_blk).squeeze(
+                1)  # shape (H, h)
 
             s_max_block.append(s_max)
             s_exp_sum_block.append(s_exp_sum)
@@ -336,13 +342,15 @@ def align_attention_inter(lengths):
 
     attn_out_triton = token_attention_bib_raw(
         q, k, v, sm_scale,
-        req_to_token_indexs, request_to_block, torch.arange(batch_size).cuda(), torch.tensor(lengths).cuda(),
+        req_to_token_indexs, request_to_block, torch.arange(batch_size).cuda(),
+        torch.tensor(lengths).cuda(),
         block_to_request, block_to_start,
         Smax, Sexp_sum, Sexp_v_sum,
         attn_out_triton,
         batch=batch_size,
         kv_group_num=kv_group_num, head=head,
-        BLOCK_N=BLOCK_N, hidden=hidden, max_blocks=max_blocks, num_block=num_block
+        BLOCK_N=BLOCK_N, hidden=hidden, max_blocks=max_blocks,
+        num_block=num_block
     )
 
     # _bib_qkv_kernel[grid](
@@ -382,7 +390,8 @@ def align_attention_inter(lengths):
 
     torch.cuda.synchronize()
     print(f'max error = {(attn_out_triton - att_out_ref).abs().max()}')
-    cos_sim = torch.nn.functional.cosine_similarity(attn_out_triton.view(-1), att_out_ref.view(-1), dim=0)
+    cos_sim = torch.nn.functional.cosine_similarity(attn_out_triton.view(-1),
+                                                    att_out_ref.view(-1), dim=0)
     print(f'cosine similarity = {cos_sim.item()}')
 
 
