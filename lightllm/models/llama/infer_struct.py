@@ -1,7 +1,10 @@
+import logging
 import math
 import torch
 import numpy as np
 import triton
+
+logger = logging.getLogger(__name__)
 
 from lightllm.common.basemodel import InferStateInfo
 from lightllm.common.req_manager import ReqManager
@@ -43,6 +46,7 @@ class LlamaInferStateInfo(InferStateInfo):
         if self.req_to_block is not None:
             return
         else:
+            # logger.debug(f'init bib with bib={chunk_size} batch_size={q.shape[0]}')
             k_length = self.b_seq_len
             k_start = self.b_start_loc
             batch_size, H, h = q.shape
@@ -52,9 +56,11 @@ class LlamaInferStateInfo(InferStateInfo):
             blocks = (k_length / chunk_size).ceil().int()
             total_blocks = blocks.sum().item()
             max_blocks = blocks.max().item()
+            max_blocks_round = triton.next_power_of_2(max_blocks)
             block_to_request = np.zeros((total_blocks,), dtype=np.int32)
             block_to_start = np.zeros((total_blocks,), dtype=np.int32)
-            request_to_block = np.zeros((batch_size, max_blocks), dtype=np.int32) - 1
+            used_blk = max(1024, max_blocks_round)
+            request_to_block = np.zeros((batch_size, used_blk), dtype=np.int32) - 1
 
             _arange = np.arange(total_blocks)
             block_idx = 0
@@ -76,14 +82,15 @@ class LlamaInferStateInfo(InferStateInfo):
             self.sm_scale = 1.0 / (h ** 0.5)
             self.batch_size = batch_size
             self.num_block = total_blocks
-            self.max_blocks = (self.b_seq_len.max() / chunk_size).ceil().int().item()
-            self.max_blocks_round = triton.next_power_of_2(self.max_blocks)
+            self.max_blocks = max_blocks
+            self.max_blocks_round = max_blocks_round
 
             self.req_to_block = request_to_block
             self.block_to_batch = block_to_request
             self.block_to_start = block_to_start
 
-            self.s_max = torch.empty((total_blocks, H), dtype=torch.float32, device=q.device)
-            self.s_exp_sum = torch.empty((total_blocks, H), dtype=torch.float32, device=q.device)
-            self.s_exp_v_sum = torch.empty((total_blocks, H, h), dtype=torch.float32, device=q.device)
+            pot_total_blocks = triton.next_power_of_2(total_blocks)
+            self.s_max = torch.empty((pot_total_blocks, H), dtype=torch.float32, device=q.device)
+            self.s_exp_sum = torch.empty((pot_total_blocks, H), dtype=torch.float32, device=q.device)
+            self.s_exp_v_sum = torch.empty((pot_total_blocks, H, h), dtype=torch.float32, device=q.device)
             return

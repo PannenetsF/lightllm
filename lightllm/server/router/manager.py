@@ -14,7 +14,7 @@ from .req_queue import ReqQueue
 from rpyc.utils.classic import obtain
 from lightllm.utils.infer_utils import calculate_time
 from ..io_struct import BatchTokenIdOut, AbortReq, ReqRunStatus, FinishStatus
-from .stats import Stats
+from .stats import Stats, Statistics
 from .pause_strategy import Fcfs, select_paused_reqs, BibPause
 from ..tokenizer import get_tokenizer
 from lightllm.utils.log_utils import init_logger
@@ -58,6 +58,7 @@ class RouterManager:
             self.bib_strategy = args.bib_strategy_name
             self.pause_strategy = BibPause()
         self.stats_tool = Stats(not args.disable_log_stats, args.log_stats_interval)
+        self.statistics = Statistics(f'./testme-{self.is_bib_mode}.json')
         return
 
     async def wait_to_model_ready(self):
@@ -153,6 +154,7 @@ class RouterManager:
             await self._step()
             counter_count += 1
             if self.running_batch is not None:
+                self.statistics.add(self.running_batch)
                 if counter_count % 50 == 0:
                     total_used_tokens = self.prompt_cache_used_tokens + self.running_batch.batch_used_tokens + self.req_queue.pause_req_used_tokens
                     token_ratio = total_used_tokens / self.max_total_token_num
