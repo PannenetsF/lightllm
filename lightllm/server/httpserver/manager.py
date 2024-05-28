@@ -90,7 +90,7 @@ class HttpServerManager:
         return len(prompt_ids)
 
     async def generate(
-        self, prompt, sampling_params: SamplingParams, group_request_id, multimodal_params, request=None
+        self, prompt, sampling_params: SamplingParams, group_request_id, multimodal_params, request=None, session_id=None,
     ):
         # 统计信息变量
         start_time = time.time()
@@ -141,7 +141,7 @@ class HttpServerManager:
         if self.enable_multimodal:
             self.send_to_visual.send_pyobj((prompt_ids, sampling_params, multimodal_params, group_request_id))
         else:
-            self.send_to_router.send_pyobj((prompt_ids, sampling_params, multimodal_params, group_request_id))
+            self.send_to_router.send_pyobj((prompt_ids, sampling_params, multimodal_params, group_request_id, session_id))
 
         unfinished_count = sampling_params.best_of
 

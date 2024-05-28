@@ -7,7 +7,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from typing import Tuple
 from sortedcontainers import SortedSet
-from .shared_arr import SharedArray, SharedTreeInfoNode, SharedLinkedListManager
+from lightllm.server.router.dynamic_prompt.shared_arr import SharedArray, SharedTreeInfoNode, SharedLinkedListManager
 from lightllm.common.mem_manager import MemoryManager
 
 
@@ -317,7 +317,7 @@ class RadixCache:
         print(
             " " * indent,
             f"shared_idx: {node.shared_idx_node.get_idx()} p_idx: {node.shared_idx_node.get_parent_idx()} \
-            k: {node.token_id_key[0:10]} v: {node.token_mem_index_value[0:10]} refs: {node.ref_counter} \
+            k: {node.token_id_key[0:10].tolist()} \
             time_id: {node.time_id} prefix_total_len: {node.shared_idx_node.get_node_prefix_total_len()} \
             node_value_len: {node.shared_idx_node.get_node_value_len()}",
         )

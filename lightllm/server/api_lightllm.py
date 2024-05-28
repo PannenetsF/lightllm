@@ -1,5 +1,6 @@
 import collections
 from typing import AsyncGenerator
+from uuid import  uuid3, NAMESPACE_DNS
 from fastapi import BackgroundTasks, Request
 from fastapi.responses import Response, StreamingResponse
 from .sampling_params import SamplingParams
@@ -8,11 +9,24 @@ from .metrics import monitor
 import json
 
 
+_session_id_cnt = 0
+_session_pool = set()
+def generate_session_id() -> str:
+    global _session_id_cnt
+    id = uuid3(NAMESPACE_DNS, "lightllm_session" + str(_session_id_cnt))
+    _session_id_cnt += 1 
+    hex_str = id.hex
+    _session_pool.add(hex_str)
+    return hex_str
+
+
 async def lightllm_generate(request: Request, g_id_gen, httpserver_manager) -> Response:
     monitor.counter_inc("lightllm_request_count")
 
     request_dict = await request.json()
     prompt = request_dict.pop("inputs")
+    session_id = request_dict.pop("session_id", generate_session_id())
+    assert session_id in _session_pool, f"session_id should be in session_pool, or it is illegal. id={session_id} set={_session_pool}"
     sample_params_dict = request_dict["parameters"]
     return_details = sample_params_dict.pop("return_details", False)
     sampling_params = SamplingParams(**sample_params_dict)
@@ -22,7 +36,7 @@ async def lightllm_generate(request: Request, g_id_gen, httpserver_manager) -> R
 
     group_request_id = g_id_gen.generate_id()
     results_generator = httpserver_manager.generate(
-        prompt, sampling_params, group_request_id, multimodal_params, request=request
+        prompt, sampling_params, group_request_id, multimodal_params, request=request, session_id=session_id
     )
 
     # Non-streaming case
@@ -48,8 +62,8 @@ async def lightllm_generate(request: Request, g_id_gen, httpserver_manager) -> R
         count_output_tokens_dict[sub_req_id] += 1
         final_output_dict[sub_req_id].append(request_output)
         if return_details:
-            metadata["text"] = request_output
             tokens_dict[sub_req_id].append(metadata)
+            metadata["text"] = request_output
 
         if finish_status.is_finished():
             finish_reason_dict[sub_req_id] = finish_status
@@ -67,6 +81,7 @@ async def lightllm_generate(request: Request, g_id_gen, httpserver_manager) -> R
         "generated_text": final_output_list,
         "count_output_tokens": ret_data_format(count_output_tokens_list),
         "finish_reason": ret_data_format(finish_reson_list),
+        "session_id": session_id,
     }
     if return_details:
         ret["tokens"] = ret_data_format(tokens_list)

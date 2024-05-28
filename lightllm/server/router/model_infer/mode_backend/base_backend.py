@@ -1,47 +1,52 @@
-import os
 import asyncio
+import os
+from datetime import timedelta
+from typing import Dict, List, Tuple
+
 import numpy as np
 import rpyc
 import torch
-from datetime import timedelta
-from typing import Dict, List, Tuple
-from transformers.configuration_utils import PretrainedConfig
-from lightllm.models.mixtral.model import MixtralTpPartModel
-from lightllm.models.qwen2.model import Qwen2TpPartModel
 from rpyc.utils.classic import obtain
+from transformers.configuration_utils import PretrainedConfig
 
-from lightllm.models.bloom.model import BloomTpPartModel
-from lightllm.models.llama.model import LlamaTpPartModel
-from lightllm.models.llama_wquant.model import LlamaTpPartModelWQuant
-from lightllm.models.llama_awquant.model import LlamaTpPartModelAWQuant
-from lightllm.models.llama_quik.model import LlamaTpPartModelQuik
-from lightllm.models.starcoder.model import StarcoderTpPartModel
-from lightllm.models.starcoder_wquant.model import StarcoderTpPartModelWQuant
-from lightllm.models.starcoder2.model import Starcoder2TpPartModel
-from lightllm.models.qwen.model import QWenTpPartModel
-from lightllm.models.qwen_wquant.model import QWenTpPartModelWQuant
-from lightllm.models.baichuan7b.model import Baichuan7bTpPartModel
-from lightllm.models.baichuan13b.model import Baichuan13bTpPartModel
 from lightllm.models.baichuan2_7b.model import Baichuan2_7bTpPartModel
 from lightllm.models.baichuan2_13b.model import Baichuan2_13bTpPartModel
+from lightllm.models.baichuan7b.model import Baichuan7bTpPartModel
+from lightllm.models.baichuan13b.model import Baichuan13bTpPartModel
+from lightllm.models.bloom.model import BloomTpPartModel
 from lightllm.models.chatglm2.model import ChatGlm2TpPartModel
-from lightllm.models.internlm.model import InternlmTpPartModel
-from lightllm.models.stablelm.model import StablelmTpPartModel
-from lightllm.models.internlm2.model import Internlm2TpPartModel
-from lightllm.models.internlm_wquant.model import InternlmTpPartModelWQuant
-from lightllm.models.internlm2_wquant.model import Internlm2TpPartModelWQuant
-from lightllm.models.yi.model import YiTpPartModel
-from lightllm.models.mistral.model import MistralTpPartModel
-from lightllm.models.minicpm.model import MiniCPMTpPartModel
-from lightllm.models.llava.model import LlavaTpPartModel
-from lightllm.models.qwen_vl.model import QWenVLTpPartModel
-from lightllm.models.internlm_xcomposer.model import InternlmComposerTpPartModel
 from lightllm.models.gemma_2b.model import Gemma_2bTpPartModel
-from lightllm.utils.infer_utils import set_random_seed
-from lightllm.utils.infer_utils import calculate_time, mark_start, mark_end
-from lightllm.utils.log_utils import init_logger
+from lightllm.models.internlm2.model import Internlm2TpPartModel
+from lightllm.models.internlm2_wquant.model import Internlm2TpPartModelWQuant
+from lightllm.models.internlm.model import InternlmTpPartModel
+from lightllm.models.internlm_wquant.model import InternlmTpPartModelWQuant
+from lightllm.models.internlm_xcomposer.model import \
+    InternlmComposerTpPartModel
+from lightllm.models.llama.model import LlamaTpPartModel
+from lightllm.models.llama_awquant.model import LlamaTpPartModelAWQuant
+from lightllm.models.llama_quik.model import LlamaTpPartModelQuik
+from lightllm.models.llama_wquant.model import LlamaTpPartModelWQuant
+from lightllm.models.llava.model import LlavaTpPartModel
+from lightllm.models.minicpm.model import MiniCPMTpPartModel
+from lightllm.models.mistral.model import MistralTpPartModel
+from lightllm.models.mixtral.model import MixtralTpPartModel
+from lightllm.models.qwen2.model import Qwen2TpPartModel
+from lightllm.models.qwen.model import QWenTpPartModel
+from lightllm.models.qwen_vl.model import QWenVLTpPartModel
+from lightllm.models.qwen_wquant.model import QWenTpPartModelWQuant
+from lightllm.models.stablelm.model import StablelmTpPartModel
+from lightllm.models.starcoder2.model import Starcoder2TpPartModel
+from lightllm.models.starcoder.model import StarcoderTpPartModel
+from lightllm.models.starcoder_wquant.model import StarcoderTpPartModelWQuant
+from lightllm.models.yi.model import YiTpPartModel
+from lightllm.server.router.dynamic_prompt.cold_hot_cache import \
+    ColdHotRadixCache
 from lightllm.server.router.dynamic_prompt.radix_cache import RadixCache
-from lightllm.server.router.model_infer.infer_batch import InferBatch, InferReq, InferSamplingParams, requests_mapping
+from lightllm.server.router.model_infer.infer_batch import (
+    InferBatch, InferReq, InferSamplingParams, requests_mapping)
+from lightllm.utils.infer_utils import (calculate_time, mark_end, mark_start,
+                                        set_random_seed)
+from lightllm.utils.log_utils import init_logger
 
 
 class ModeBackend:
@@ -60,8 +65,12 @@ class ModeBackend:
         self.mode = kvargs["mode"]
         self.is_splitfuse_mode = kvargs.get("is_splitfuse_mode", False)
         self.splitfuse_block_size = kvargs.get("splitfuse_block_size", None)
-        self.return_all_prompt_logprobs = kvargs.get("return_all_prompt_logprobs", False)
+        self.return_all_prompt_logprobs = kvargs.get(
+            "return_all_prompt_logprobs", False
+        )
         self.use_dynamic_prompt_cache = kvargs.get("use_dynamic_prompt_cache", False)
+        self.stateful_mode = kvargs.get("stateful_mode", False)
+        self.use_stateful_inference = kvargs.get("use_stateful_inference", False)
         self.eos_id: List[int] = kvargs.get("eos_id", [2])
 
         self.cache = {}
@@ -71,7 +80,10 @@ class ModeBackend:
         max_total_token_num = kvargs["max_total_token_num"]
 
         dist.init_process_group(
-            "nccl", init_method=f'tcp://127.0.0.1:{kvargs["nccl_port"]}', rank=self.tp_rank, world_size=world_size
+            "nccl",
+            init_method=f'tcp://127.0.0.1:{kvargs["nccl_port"]}',
+            rank=self.tp_rank,
+            world_size=world_size,
         )
         torch.cuda.set_device(self.tp_rank)
 
@@ -95,7 +107,10 @@ class ModeBackend:
             "use_dynamic_prompt_cache": self.use_dynamic_prompt_cache,
             "data_type": kvargs.get("data_type", "float16"),
         }
-        is_weight_only_quant = any("w6a16" in mode_ or "w8a16" in mode_ or "w4a16" in mode_ for mode_ in self.mode)
+        is_weight_only_quant = any(
+            "w6a16" in mode_ or "w8a16" in mode_ or "w4a16" in mode_
+            for mode_ in self.mode
+        )
 
         try:
             self.model_type = model_cfg.get("model_type", "")
@@ -159,7 +174,10 @@ class ModeBackend:
                 self.model = StablelmTpPartModel(model_kvargs)
             elif self.model_type == "mixtral":
                 self.model = MixtralTpPartModel(model_kvargs)
-            elif self.model_type == "minicpm" or model_cfg["architectures"][0] == "MiniCPMForCausalLM":
+            elif (
+                self.model_type == "minicpm"
+                or model_cfg["architectures"][0] == "MiniCPMForCausalLM"
+            ):
                 self.model = MiniCPMTpPartModel(model_kvargs)
             elif self.model_type == "llava":
                 self.model = LlavaTpPartModel(model_kvargs)
@@ -182,9 +200,29 @@ class ModeBackend:
 
         set_random_seed(2147483647)
 
+        if self.use_stateful_inference:
+            self.use_dynamic_prompt_cache = False
+            self.logger.warning(
+                f"use_stateful_inference is set to True, use_dynamic_prompt_cache is set to False"
+            )
         self.radix_cache = (
-            RadixCache(str(kvargs["nccl_port"]), max_total_token_num, self.tp_rank, mem_manager=self.model.mem_manager)
-            if self.use_dynamic_prompt_cache
+            RadixCache(
+                str(kvargs["nccl_port"]),
+                max_total_token_num,
+                self.tp_rank,
+                mem_manager=self.model.mem_manager,
+            )
+            if self.use_dynamic_prompt_cache or self.stateful_mode
+            else None
+        )
+        self.coldhot_cache = (
+            ColdHotRadixCache(
+                str(kvargs["nccl_port"]),
+                max_total_token_num,
+                self.tp_rank,
+                mem_manager=self.model.mem_manager,
+            )
+            if False
             else None
         )
         self.init_custom()
@@ -192,7 +230,7 @@ class ModeBackend:
         return
 
     def init_custom(self):
-        pass 
+        pass
 
     # @calculate_time(show=False, min_cost_ms=300)
     def prefill_batch(self, batch_id):
@@ -212,6 +250,7 @@ class ModeBackend:
             self.model.req_manager,
             self.model.vocab_size,
             self.radix_cache,
+            self.coldhot_cache,
         )
         self.cache[batch_id] = batch_data
 

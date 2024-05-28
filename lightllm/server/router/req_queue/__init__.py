@@ -1,3 +1,4 @@
+from lightllm.server.router.req_queue.stateful_batch.impl import StatefulBatchQueue
 from .continues_batch.impl import ContinuesBatchQueue
 from .continues_batch.beam_impl import BeamContinuesBatchQueue
 from .splitfuse.impl import SplitFuseQueue
@@ -10,4 +11,7 @@ def build_req_queue(args, router):
         return BeamContinuesBatchQueue(args, router)
     if args.diverse_mode:
         return BeamContinuesBatchQueue(args, router)
+    if args.stateful_mode:
+        # return StatefulBatchQueue(args, router)
+        return ContinuesBatchQueue(args, router)
     return ContinuesBatchQueue(args, router)

@@ -373,6 +373,7 @@ def main():
     parser.add_argument("--beam_mode", action="store_true", help="use beamsearch mode")
     parser.add_argument("--diverse_mode", action="store_true", help="diversity generation mode")
     parser.add_argument("--token_healing_mode", action="store_true", help="code model infer mode")
+    parser.add_argument("--stateful_mode", action="store_true", help="use stateful mode")
 
     parser.add_argument(
         "--enable_multimodal", action="store_true", help="Whether or not to allow to load additional multimodal models."
@@ -450,6 +451,13 @@ def main():
             batch_max_tokens = int(1 / 6 * args.max_total_token_num)
             batch_max_tokens = max(batch_max_tokens, args.splitfuse_block_size)
             args.batch_max_tokens = batch_max_tokens
+
+    # multi round stateful serving 
+    if args.stateful_mode:
+        assert args.splitfuse_mode is False, "stateful mode can not use splitfuse mode"
+        assert args.beam_mode is False, "stateful mode can not use beam mode"
+        assert args.diverse_mode is False, "stateful mode can not use diverse mode"
+
 
     can_use_ports = alloc_can_use_network_port(num=5 + args.tp, used_nccl_port=args.nccl_port)
     router_port, detokenization_port, httpserver_port, visual_port, cache_port = can_use_ports[0:5]

@@ -1,5 +1,6 @@
-from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
 import torch
+from lightllm.server.router.dynamic_prompt.cold_hot_cache import ColdHotRadixCache
+from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
 from lightllm.utils.infer_utils import set_random_seed
 from lightllm.utils.infer_utils import calculate_time, mark_start, mark_end
 from lightllm.server.router.model_infer.infer_batch import InferBatch, InferReq, InferSamplingParams, requests_mapping
@@ -9,8 +10,11 @@ from .pre_process import prepare_prefill_inputs, prepare_decode_inputs
 from .post_process import sample
 
 
-class ContinuesBatchBackend(ModeBackend):
-    def __init__(self) -> None:
+from lightllm.server.router.model_infer.mode_backend.continues_batch.impl import ContinuesBatchBackend
+
+
+class MultiRoundBackend(ContinuesBatchBackend):
+    def __init__(self):
         super().__init__()
 
     @calculate_time(show=False, min_cost_ms=300)
