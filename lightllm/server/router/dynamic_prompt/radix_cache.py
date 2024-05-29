@@ -55,6 +55,7 @@ class TreeNode:
         split_parent_node.children[self.token_id_key[prefix_len].item()] = self
         split_parent_node.ref_counter = self.ref_counter
         split_parent_node.hot_counter = self.hot_counter
+        split_parent_node.evict_time = self.evict_time
 
         split_parent_node.shared_idx_node.set_parent_idx(self.shared_idx_node.get_parent_idx())
         new_len = len(split_parent_node.token_mem_index_value)
@@ -227,7 +228,8 @@ class RadixCache:
                 if prefix_len == len(key):
                     if child.is_leaf():
                         self.evict_tree_set.discard(child)
-                    child.update_time()
+                    with modify_object_in_sets([self.coldhot_evict_queue], child) as child:
+                        child.update_time()
                     if child.is_leaf():
                         self.evict_tree_set.add(child)
                     return prefix_len
@@ -238,8 +240,13 @@ class RadixCache:
 
                     key = key[prefix_len:]
                     value = value[prefix_len:]
+                    if child in self.coldhot_evict_queue:
+                        self.coldhot_evict_queue.discard(child)
                     split_parent_node = child.split_node(prefix_len)
                     new_node = split_parent_node.add_and_return_new_child(key, value)
+                    if child in self.coldhot_evict_queue:
+                        self.coldhot_evict_queue.add(child)
+                        self.coldhot_evict_queue.add(split_parent_node)
                     # update total token num
                     self.tree_total_tokens_num.arr[0] += len(new_node.token_mem_index_value)
 
@@ -257,7 +264,8 @@ class RadixCache:
                     assert False, "can not run to here"
 
             else:
-                new_node = node.add_and_return_new_child(key, value)
+                with modify_object_in_sets([self.coldhot_evict_queue], node) as node:
+                    new_node = node.add_and_return_new_child(key, value)
                 # update total token num
                 self.tree_total_tokens_num.arr[0] += len(new_node.token_mem_index_value)
                 if new_node.is_leaf():
