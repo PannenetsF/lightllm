@@ -2,18 +2,23 @@ import collections
 from typing import AsyncGenerator
 from fastapi import BackgroundTasks, Request
 from fastapi.responses import Response, StreamingResponse
+
+from lightllm.server.httpserver.manager import HttpServerManager
+from lightllm.server.req_id_generator import ReqIDGenerator
+from lightllm.server.session_id_generator import SessionIDGenerator
 from .sampling_params import SamplingParams
 from .multimodal_params import MultimodalParams
 from .metrics import monitor
 import json
 
 
-async def lightllm_generate(request: Request, g_id_gen, httpserver_manager) -> Response:
+async def lightllm_generate(request: Request, g_id_gen: ReqIDGenerator, g_session_gen: SessionIDGenerator, httpserver_manager: HttpServerManager) -> Response:
     monitor.counter_inc("lightllm_request_count")
 
     request_dict = await request.json()
     prompt = request_dict.pop("inputs")
     sample_params_dict = request_dict["parameters"]
+    session_id = sample_params_dict.pop("session_id", g_session_gen.generate_session_id())
     return_details = sample_params_dict.pop("return_details", False)
     sampling_params = SamplingParams(**sample_params_dict)
     sampling_params.verify()
@@ -22,7 +27,7 @@ async def lightllm_generate(request: Request, g_id_gen, httpserver_manager) -> R
 
     group_request_id = g_id_gen.generate_id()
     results_generator = httpserver_manager.generate(
-        prompt, sampling_params, group_request_id, multimodal_params, request=request
+        prompt, sampling_params, group_request_id, multimodal_params, session_id=session_id, request=request,
     )
 
     # Non-streaming case

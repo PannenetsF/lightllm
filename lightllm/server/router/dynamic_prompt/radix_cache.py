@@ -1,4 +1,5 @@
 # Adapted from https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/managers/router/radix_cache.py
+from contextlib import contextmanager
 import torch
 import heapq
 import time
@@ -7,7 +8,9 @@ from collections import defaultdict
 from dataclasses import dataclass
 from typing import Tuple
 from sortedcontainers import SortedSet
-from .shared_arr import SharedArray, SharedTreeInfoNode, SharedLinkedListManager
+
+from lightllm.server.router.dynamic_prompt.shared_arr import SharedArray, SharedLinkedListManager, SharedTreeInfoNode
+# from .shared_arr import SharedArray, SharedTreeInfoNode, SharedLinkedListManager
 from lightllm.common.mem_manager import MemoryManager
 
 
@@ -34,8 +37,13 @@ class TreeNode:
         self.shared_idx_node: SharedTreeInfoNode = self.shared_idx_manager.alloc()
         self.time_id = time_gen.generate_time_id()  # 用于标识时间周期
 
+        self.hot_counter = 0 # used to record the hot degree of the node, if the node is hot, it cannot be evicted
+        self.evict_time: float = -1
+
     def get_compare_key(self):
-        return (0 if self.ref_counter == 0 else 1, len(self.children), self.time_id)
+        # return (0 if self.ref_counter == 0 else 1, len(self.children), self.time_id)
+        # need to consider the hot degree now 
+        return (0 if self.hot_counter == 0 else 1, 0 if self.ref_counter == 0 else 1, len(self.children), self.time_id)
 
     def split_node(self, prefix_len):
         split_parent_node = TreeNode(self.shared_idx_manager)
@@ -46,6 +54,7 @@ class TreeNode:
         split_parent_node.children = {}
         split_parent_node.children[self.token_id_key[prefix_len].item()] = self
         split_parent_node.ref_counter = self.ref_counter
+        split_parent_node.hot_counter = self.hot_counter
 
         split_parent_node.shared_idx_node.set_parent_idx(self.shared_idx_node.get_parent_idx())
         new_len = len(split_parent_node.token_mem_index_value)
@@ -104,6 +113,22 @@ def match(key, seq):
     return i
 
 
+@contextmanager
+def modify_object_in_sets(set_list, obj_x):
+    sets_containing_x = [s for s in set_list if obj_x in s]
+    
+    # Remove the object from the sets it is in
+    for s in sets_containing_x:
+        s.remove(obj_x)
+    
+    try:
+        yield obj_x
+    finally:
+        # Re-insert the object into the sets it was in
+        for s in sets_containing_x:
+            s.add(obj_x)
+
+
 class RadixCache:
     """
     unique_name 主要用于解决单机，多实列部署时的shm冲突
@@ -120,6 +145,7 @@ class RadixCache:
         self.root_node.token_id_key = torch.zeros((0,), device="cpu", dtype=self._key_dtype)
         self.root_node.token_mem_index_value = torch.zeros((0,), device="cpu", dtype=self._value_dtype)
         self.root_node.ref_counter = 1  # 初始化为 1 保证永远不会被 evict 掉
+        self.root_node.hot_counter = 1  # 初始化为 1 保证永远不会被 evict 掉
 
         self.evict_tree_set = SortedSet(key=lambda x: x.get_compare_key())  # 自定义比较器
         self.evict_tree_set.add(self.root_node)
@@ -129,11 +155,64 @@ class RadixCache:
         self.tree_total_tokens_num = SharedArray(f"{unique_name}_tree_total_tokens_num_{tp_id}", (1,), dtype=np.int64)
         self.tree_total_tokens_num.arr[0] = 0
 
+        self.session2leaf = {} # track the session id to the leaf node
+        self.leaf2session = {}
+        self.coldhot_evict_queue = SortedSet(key=lambda x: x.evict_time)
+
+
+    def _update_session_info(self, src, tgt):
+        if src in self.leaf2session:
+            sid = self.leaf2session.pop(src)
+            self.leaf2session[tgt] = sid
+            self.session2leaf[sid] = tgt
+
+    def keep_session(self, session_id, key, interval=5):
+        # find the leaf node for the key 
+        leaf_node = self._match_prefix_helper(self.root_node, key, [], update_refs=False)
+        print("try to find key ", key, " find match ", leaf_node.token_id_key)
+        self.session2leaf[session_id] = leaf_node
+        self.leaf2session[leaf_node] = session_id
+        self._set_eviction_time(leaf_node, time.time(), interval)
+
+    def _set_eviction_time(self, leaf_node: TreeNode, now: float, interval: float):
+        node = leaf_node
+        _debug_list = [] # show the ids of the nodes in the path
+        while node is not self.root_node:
+            _debug_list.append(node.token_id_key)
+            with modify_object_in_sets([self.coldhot_evict_queue, self.evict_tree_set], node) as node:
+                if node.evict_time < 0:
+                    node.evict_time = now + interval
+                else:
+                    node.evict_time = max(node.evict_time, now + interval)
+                node.hot_counter += 1
+            self.coldhot_evict_queue.add(node)
+            node = node.parent
+        print("the path of the node is ", _debug_list)
+
+    def _cold_hot_evict(self):
+        now = time.time()
+        cold_nodes = []
+        for node in self.coldhot_evict_queue:
+            if node.evict_time < now:
+                cold_nodes.append(node)
+            else:
+                break
+        for node in cold_nodes:
+            self.coldhot_evict_queue.discard(node)
+            with modify_object_in_sets([self.evict_tree_set], node) as node:
+                node.hot_counter = 0
+                node.evict_time = -1
+        
+
+
+
+
     def insert(self, key, value=None):
         if value is None:
             value = key
 
         assert len(key) == len(value) and len(key) >= 1
+        self._cold_hot_evict()
         return self._insert_helper(self.root_node, key, value)
 
     def _insert_helper(self, node: TreeNode, key, value):
@@ -228,6 +307,7 @@ class RadixCache:
                     return self._match_prefix_helper(child, key[prefix_len:], ans_value_list, update_refs=update_refs)
                 elif prefix_len < len(child.token_id_key):
                     if child.is_leaf():
+                        print(f'the set is {self.evict_tree_set}', flush=True)
                         self.evict_tree_set.discard(child)
 
                     split_parent_node = child.split_node(prefix_len)
@@ -317,16 +397,18 @@ class RadixCache:
         print(
             " " * indent,
             f"shared_idx: {node.shared_idx_node.get_idx()} p_idx: {node.shared_idx_node.get_parent_idx()} \
-            k: {node.token_id_key[0:10]} v: {node.token_mem_index_value[0:10]} refs: {node.ref_counter} \
+            refs: {node.ref_counter} hot_refs: {node.hot_counter} \
             time_id: {node.time_id} prefix_total_len: {node.shared_idx_node.get_node_prefix_total_len()} \
             node_value_len: {node.shared_idx_node.get_node_value_len()}",
         )
+            # k: {node.token_id_key[0:10]} v: {node.token_mem_index_value[0:10]} refs: {node.ref_counter} 
         for _, child in node.children.items():
             self._print_helper(child, indent=indent + 2)
         return
 
     def free_radix_cache_to_get_enough_token(self, need_token_num):
         assert self.mem_manager is not None
+        self._cold_hot_evict()
         if need_token_num > self.mem_manager.can_use_mem_size:
             need_evict_token_num = need_token_num - self.mem_manager.can_use_mem_size
             release_mems = []
@@ -375,6 +457,16 @@ class RadixCacheReadOnlyClient:
 # ///////////////////////////////////////////////////////////////////////////////
 
 if __name__ == "__main__":
+    def test0():
+        tree = RadixCache("unique_name", 100, 0)
+        ans = tree.insert(torch.tensor([0, 1, 2, 3, 4, 5, 6, 7, 8, 9], dtype=torch.int64, device="cpu"))
+        assert ans == 0
+        ans = tree.match_prefix(torch.tensor([0, 1, 2, 3, 4, 5, 6, 7, 8, 9], dtype=torch.int64, device="cpu"))
+        print(ans)
+
+    test0()
+    exit(0)
+
     # test 1
     def test1():
         tree = RadixCache("unique_name", 100, 0)

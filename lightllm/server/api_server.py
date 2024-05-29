@@ -45,6 +45,7 @@ from .router.manager import start_router_process
 from .embed_cache.manager import start_cache_manager
 from .visualserver.manager import start_visual_process
 from .req_id_generator import ReqIDGenerator
+from .session_id_generator import SessionIDGenerator
 from .api_tgi import tgi_generate_impl, tgi_generate_stream_impl
 from .api_lightllm import lightllm_generate, lightllm_generate_stream
 
@@ -72,6 +73,7 @@ logger = init_logger(__name__)
 TIMEOUT_KEEP_ALIVE = 5  # seconds.
 
 g_id_gen = ReqIDGenerator()
+g_session_id_gen = SessionIDGenerator()
 app = FastAPI()
 server = uvicorn.Server(uvicorn.Config(app))
 
@@ -139,7 +141,7 @@ async def token_load(request: Request):
 async def generate(request: Request) -> Response:
     first_set_handle_loop()
     try:
-        return await g_generate_func(request, g_id_gen, httpserver_manager)
+        return await g_generate_func(request, g_id_gen, g_session_id_gen, httpserver_manager)
     except Exception as e:
         return create_error_response(HTTPStatus.EXPECTATION_FAILED, str(e))
 

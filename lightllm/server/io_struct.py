@@ -39,9 +39,10 @@ class FinishStatus(enum.Enum):
 
 
 class Req:
-    def __init__(self, request_id, prompt_ids, sample_params: SamplingParams, multimodal_params: MultimodalParams):
+    def __init__(self, request_id, prompt_ids, sample_params: SamplingParams, multimodal_params: MultimodalParams, session_id: str):
         self.request_id = request_id
         self.group_req_id = convert_sub_id_to_group_id(request_id)
+        self.session_id = session_id
         self.prompt_ids = prompt_ids
         self.input_len = len(prompt_ids)
         self.max_output_len = sample_params.max_new_tokens
@@ -60,6 +61,7 @@ class Req:
     def to_rpc_obj(self):
         return {
             "request_id": self.request_id,
+            "session_id": self.session_id,
             "group_req_id": self.group_req_id,
             "input_id": self.prompt_ids,
             "sampling_param": self.sample_params.to_dict(),
@@ -84,8 +86,8 @@ class Req:
 
 
 class NormalReq(Req):
-    def __init__(self, request_id, prompt_ids, sample_params: SamplingParams, multimodal_params: MultimodalParams):
-        super().__init__(request_id, prompt_ids, sample_params, multimodal_params)
+    def __init__(self, request_id, prompt_ids, sample_params: SamplingParams, multimodal_params: MultimodalParams, session_id: str):
+        super().__init__(request_id, prompt_ids, sample_params, multimodal_params, session_id)
         return
 
     def get_tuple_tokens(self, is_busy, router_max_new_token_len):
@@ -135,8 +137,9 @@ class SplitFuseReq(Req):
         sample_params: SamplingParams,
         multimodal_params: MultimodalParams,
         splitfuse_block_size=None,
+        session_id: str = None,
     ):
-        super().__init__(request_id, prompt_ids, sample_params, multimodal_params)
+        super().__init__(request_id, prompt_ids, sample_params, multimodal_params, session_id)
         self.splitfuse_block_size = splitfuse_block_size
         return
 
@@ -293,7 +296,7 @@ class Batch:
         return f"batch_id={self.batch_id}, " f"reqs={self.reqs}, "
 
     def simple_log(self):
-        return f"batch_id={self.batch_id}, time:{time.time()}s req_ids:{[req.request_id for req in self.reqs]}"
+        return f"batch_id={self.batch_id}, time:{time.time()}s req_ids:{[req.request_id for req in self.reqs]} session_ids={[req.session_id for req in self.reqs]}"
 
 
 class BatchTokenIdOut:
