@@ -1,4 +1,5 @@
 import os
+from typing import List, Optional
 import torch
 from lightllm.utils.log_utils import init_logger
 from lightllm.server.router.dynamic_prompt.shared_arr import SharedInt
@@ -26,6 +27,7 @@ class MemoryManager:
         self.shared_can_use_token_num = SharedInt(f"{str(nccl_port)}_mem_manger_can_use_token_num")
 
         self.shared_can_use_token_num.set_value(self.can_use_mem_size)
+        self.kv_buffer: Optional[List[torch.Tensor]] = None
         self._init_buffers(size, dtype, head_num, head_dim, layer_num)
 
     def _init_buffers(self, size, dtype, head_num, head_dim, layer_num):
