@@ -170,16 +170,13 @@ class RadixCache:
     def keep_session(self, session_id, key, interval=5):
         # find the leaf node for the key 
         leaf_node = self._match_prefix_helper(self.root_node, key, [], update_refs=False)
-        print("try to find key ", key, " find match ", leaf_node.token_id_key)
         self.session2leaf[session_id] = leaf_node
         self.leaf2session[leaf_node] = session_id
         self._set_eviction_time(leaf_node, time.time(), interval)
 
     def _set_eviction_time(self, leaf_node: TreeNode, now: float, interval: float):
         node = leaf_node
-        _debug_list = [] # show the ids of the nodes in the path
         while node is not self.root_node:
-            _debug_list.append(node.token_id_key)
             with modify_object_in_sets([self.coldhot_evict_queue, self.evict_tree_set], node) as node:
                 if node.evict_time < 0:
                     node.evict_time = now + interval
@@ -188,7 +185,6 @@ class RadixCache:
                 node.hot_counter += 1
             self.coldhot_evict_queue.add(node)
             node = node.parent
-        print("the path of the node is ", _debug_list)
 
     def _cold_hot_evict(self):
         now = time.time()
@@ -315,7 +311,6 @@ class RadixCache:
                     return self._match_prefix_helper(child, key[prefix_len:], ans_value_list, update_refs=update_refs)
                 elif prefix_len < len(child.token_id_key):
                     if child.is_leaf():
-                        print(f'the set is {self.evict_tree_set}', flush=True)
                         self.evict_tree_set.discard(child)
 
                     split_parent_node = child.split_node(prefix_len)

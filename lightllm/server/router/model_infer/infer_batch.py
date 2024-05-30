@@ -275,11 +275,7 @@ class InferBatch:
                 if radix_cache is not None:
                     key = torch.tensor(r_obj.input_token_ids, dtype=torch.int64, device="cpu")
                     key = key[0 : len(key) - 1]  # 最后一个不需要，因为需要一个额外的token，让其在prefill的时候输出下一个token的值
-                    print(">>> BEFORE MATCH PREFIX")
-                    radix_cache.print_self(4)
                     share_node, kv_len, value_tensor = radix_cache.match_prefix(key, update_refs=True)
-                    print(">>> AFTER MATCH PREFIX")
-                    radix_cache.print_self(4)
                     if share_node is not None:
                         r_obj.shared_kv_node = share_node
                         ready_cache_len = share_node.shared_idx_node.get_node_prefix_total_len()
@@ -305,12 +301,8 @@ class InferBatch:
         else:
             key = torch.tensor(req.input_token_ids[0 : req.cur_kv_len], dtype=torch.int64, device="cpu")
             value = self.req_manager.req_to_token_indexs[req.req_idx][: req.cur_kv_len].detach().cpu()
-            print(">>> BEFORE INSERT PREFIX")
-            self.radix_cache.print_self(4)
             prefix_len = self.radix_cache.insert(key, value)
             self.radix_cache.keep_session(req.session_id, key)
-            print(">>> AFTER INSERT PREFIX")
-            self.radix_cache.print_self(4)
             free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][:prefix_len])
             if req.shared_kv_node is not None:
                 assert req.shared_kv_node.shared_idx_node.get_node_prefix_total_len() <= prefix_len
