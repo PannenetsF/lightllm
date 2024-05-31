@@ -3,7 +3,7 @@ import os
 import torch
 
 from lightllm.common.basemodel.triton_kernel.destindex_copy_kv import \
-    destindex_copy_kv as scatter_kv
+    destindex_copy_quantize_kv() as scatter_kv
 from lightllm.common.basemodel.triton_kernel.destindex_copy_kv import \
     srcindex_copy_kv as gather_kv
 from lightllm.common.mem_manager import MemoryManager
