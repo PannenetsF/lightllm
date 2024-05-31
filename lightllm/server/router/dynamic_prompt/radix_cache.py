@@ -1,12 +1,14 @@
 # Adapted from https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/managers/router/radix_cache.py
 from contextlib import contextmanager
+from enum import Enum
 import torch
 import heapq
 import time
 import numpy as np
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Tuple
+from typing import List, Tuple
+from lightllm.common.cpu_memory_manager import CPUMemoryManager
 from sortedcontainers import SortedSet
 
 from lightllm.server.router.dynamic_prompt.shared_arr import SharedArray, SharedLinkedListManager, SharedTreeInfoNode
@@ -26,6 +28,11 @@ class UniqueTimeIdGenerator:
 time_gen = UniqueTimeIdGenerator()
 
 
+class MemoryType(Enum):
+    CPU = 0
+    GPU = 1 
+    NOT_VALID = 2
+
 class TreeNode:
     def __init__(self, shared_idx_manager):
         self.shared_idx_manager: SharedLinkedListManager = shared_idx_manager
@@ -39,11 +46,21 @@ class TreeNode:
 
         self.hot_counter = 0 # used to record the hot degree of the node, if the node is hot, it cannot be evicted
         self.evict_time: float = -1
+        self.mem_type = MemoryType.NOT_VALID
+
+    def get_free_compare_key(self):
+        # 1. cpu first 
+        # 2. least recent used
+        # note all nodes to be freed are leaves, so we do not need to consider the ref counter 
+        return (0 if self.mem_type == MemoryType.CPU else 1, self.time_id)
 
     def get_compare_key(self):
         # return (0 if self.ref_counter == 0 else 1, len(self.children), self.time_id)
         # need to consider the hot degree now 
-        return (0 if self.hot_counter == 0 else 1, 0 if self.ref_counter == 0 else 1, len(self.children), self.time_id)
+        return (0 if self.mem_type == MemoryType.GPU else 1,
+                0 if self.hot_counter == 0 else 1, 
+                0 if self.ref_counter == 0 else 1, 
+                len(self.children), self.time_id)
 
     def split_node(self, prefix_len):
         split_parent_node = TreeNode(self.shared_idx_manager)
@@ -56,6 +73,7 @@ class TreeNode:
         split_parent_node.ref_counter = self.ref_counter
         split_parent_node.hot_counter = self.hot_counter
         split_parent_node.evict_time = self.evict_time
+        split_parent_node.mem_type = self.mem_type
 
         split_parent_node.shared_idx_node.set_parent_idx(self.shared_idx_node.get_parent_idx())
         new_len = len(split_parent_node.token_mem_index_value)
@@ -82,6 +100,7 @@ class TreeNode:
         assert first_token_key not in self.children.keys()
         self.children[first_token_key] = child
         child.parent = self
+        child.mem_type = self.mem_type
 
         # 更新shared 信息
         child.shared_idx_node.set_parent_idx(self.shared_idx_node.get_idx())
@@ -99,7 +118,7 @@ class TreeNode:
         self.time_id = time_gen.generate_time_id()
 
     def is_leaf(self):
-        return len(self.children) == 0
+        return (self.mem_type == MemoryType.GPU and MemoryType.GPU not in  [x.mem_type for x in self.children])
 
     def get_parent_prefix_total_len(self):
         return self.parent.shared_idx_node.get_node_prefix_total_len()
@@ -133,28 +152,51 @@ def modify_object_in_sets(set_list, obj_x):
 class RadixCache:
     """
     unique_name 主要用于解决单机，多实列部署时的shm冲突
+
+    The tree would be like 
+    ROOT
+    |-- GPU
+    |   `-- GPU
+    |       `-- GPU
+    |           |-- CPU
+    |           `-- CPU
+    |               `-- NV
+    |-- GPU
+    |   `-- GPU
+    |       |-- CPU
+    |       `-- NV
+    |-- CPU
+    |   `-- CPU
+    |-- CPU
+    `-- NV
     """
 
-    def __init__(self, unique_name, total_token_num, tp_id, mem_manager: MemoryManager = None):
+    def __init__(self, unique_name, total_token_num, total_cpu_token_num, tp_id, mem_manager: MemoryManager = None, cpu_mem_manager: CPUMemoryManager = None):
         self.mem_manager = mem_manager
+        self.cpu_mem_manager = cpu_mem_manager
         self._key_dtype = torch.int64
         self._value_dtype = torch.int64
 
-        self.shared_idx_manager = SharedLinkedListManager(unique_name, total_token_num, tp_id)
+        self.shared_idx_manager = SharedLinkedListManager(unique_name, total_token_num + total_cpu_token_num, tp_id)
 
         self.root_node = TreeNode(self.shared_idx_manager)
         self.root_node.token_id_key = torch.zeros((0,), device="cpu", dtype=self._key_dtype)
         self.root_node.token_mem_index_value = torch.zeros((0,), device="cpu", dtype=self._value_dtype)
         self.root_node.ref_counter = 1  # 初始化为 1 保证永远不会被 evict 掉
         self.root_node.hot_counter = 1  # 初始化为 1 保证永远不会被 evict 掉
+        self.root_node.mem_type = MemoryType.GPU # root node is always in GPU, or its children cannot be in GPU
 
         self.evict_tree_set = SortedSet(key=lambda x: x.get_compare_key())  # 自定义比较器
         self.evict_tree_set.add(self.root_node)
+
+        self.free_tree_set = SortedSet(key=lambda x: x.get_free_compare_key())  # used to free the tree nodes
+        self.free_tree_set.add(self.root_node)
 
         self.refed_tokens_num = SharedArray(f"{unique_name}_refed_tokens_num_{tp_id}", (1,), dtype=np.int64)
         self.refed_tokens_num.arr[0] = 0
         self.tree_total_tokens_num = SharedArray(f"{unique_name}_tree_total_tokens_num_{tp_id}", (1,), dtype=np.int64)
         self.tree_total_tokens_num.arr[0] = 0
+        self.tree_capacity = total_token_num + total_cpu_token_num
 
         self.session2leaf = {} # track the session id to the leaf node
         self.leaf2session = {}
@@ -170,6 +212,7 @@ class RadixCache:
     def keep_session(self, session_id, key, interval=5):
         # find the leaf node for the key 
         leaf_node = self._match_prefix_helper(self.root_node, key, [], update_refs=False)
+        assert leaf_node.mem_type is MemoryType.GPU, "the leaf node should be in GPU"
         self.session2leaf[session_id] = leaf_node
         self.leaf2session[leaf_node] = session_id
         self._set_eviction_time(leaf_node, time.time(), interval)
@@ -177,7 +220,7 @@ class RadixCache:
     def _set_eviction_time(self, leaf_node: TreeNode, now: float, interval: float):
         node = leaf_node
         while node is not self.root_node:
-            with modify_object_in_sets([self.coldhot_evict_queue, self.evict_tree_set], node) as node:
+            with modify_object_in_sets([self.coldhot_evict_queue, self.evict_tree_set, self.free_tree_set], node) as node:
                 if node.evict_time < 0:
                     node.evict_time = now + interval
                 else:
@@ -190,18 +233,53 @@ class RadixCache:
         now = time.time()
         cold_nodes = []
         for node in self.coldhot_evict_queue:
-            if node.evict_time < now:
                 cold_nodes.append(node)
+            if node.evict_time < now:
             else:
                 break
         for node in cold_nodes:
+            # there is no need to evict them explicitly, they will be evicted when the tree is full
+            # we just want to make sure they are alive when we still need them 
             self.coldhot_evict_queue.discard(node)
-            with modify_object_in_sets([self.evict_tree_set], node) as node:
+            with modify_object_in_sets([self.evict_tree_set, self.free_tree_set], node) as node:
                 node.hot_counter = 0
                 node.evict_time = -1
         
 
 
+    def _resume_helper(self, resume_idx, resume_len):
+        gpu_alloc_idx = self.mem_manager.alloc(resume_idx.shape[0])
+        self.cpu_mem_manager.resume(resume_idx, gpu_alloc_idx)
+        # split the resume_idx to slices with the resume_len
+        gpu_idx_list = []
+        start = 0
+        for l in resume_len:
+            end = start + l
+            gpu_idx_list.append(gpu_alloc_idx[start:end])
+            start = end
+        return gpu_idx_list
+        
+
+    def resume_from_cpu(self, leaf_node: TreeNode):
+        node: TreeNode = leaf_node 
+        resume_idx = []
+        resume_len = []
+        nodes = []
+        while node is not self.root_node:
+            if node.mem_type == MemoryType.GPU:
+                break
+            with modify_object_in_sets([self.coldhot_evict_queue, self.evict_tree_set, self.free_tree_set], node) as node:
+                node.mem_type = MemoryType.GPU
+                resume_idx.append(node.token_mem_index_value)
+                resume_len.append(len(node.token_mem_index_value))
+                nodes.append(node)
+            node = node.parent
+        resume_idx = torch.concat(resume_idx)
+        resume_len = torch.tensor(resume_len) 
+        gpu_idx_list = self._resume_helper(resume_idx, resume_len)
+        for node, gpu_idx in zip(nodes, gpu_idx_list):
+            with modify_object_in_sets([self.coldhot_evict_queue, self.evict_tree_set, self.free_tree_set], node) as node:
+                node.token_mem_index_value = gpu_idx
 
 
     def insert(self, key, value=None):
@@ -210,11 +288,14 @@ class RadixCache:
 
         assert len(key) == len(value) and len(key) >= 1
         self._cold_hot_evict()
-        return self._insert_helper(self.root_node, key, value)
+        tail_node = self._insert_helper(self.root_node, key, value)
+        self.resume_from_cpu(tail_node)
+        return tail_node 
 
     def _insert_helper(self, node: TreeNode, key, value):
         if node.is_leaf():
             self.evict_tree_set.discard(node)
+            self.free_tree_set.discard(node)
 
         try:
             first_key_id = key[0].item()
@@ -224,15 +305,18 @@ class RadixCache:
                 if prefix_len == len(key):
                     if child.is_leaf():
                         self.evict_tree_set.discard(child)
+                        self.free_tree_set.discard(child)
                     with modify_object_in_sets([self.coldhot_evict_queue], child) as child:
                         child.update_time()
                     if child.is_leaf():
                         self.evict_tree_set.add(child)
+                        self.free_tree_set.add(child)
                     return prefix_len
 
                 elif prefix_len < len(key) and prefix_len < len(child.token_id_key):
                     if child.is_leaf():
                         self.evict_tree_set.discard(child)
+                        self.free_tree_set.discard(child)
 
                     key = key[prefix_len:]
                     value = value[prefix_len:]
@@ -248,11 +332,14 @@ class RadixCache:
 
                     if split_parent_node.is_leaf():
                         self.evict_tree_set.add(split_parent_node)
+                        self.free_tree_set.add(split_parent_node)
                     if new_node.is_leaf():
                         self.evict_tree_set.add(new_node)
+                        self.free_tree_set.add(new_node)
 
                     if child.is_leaf():
                         self.evict_tree_set.add(child)
+                        self.free_tree_set.add(child)
                     return prefix_len
                 elif prefix_len < len(key) and prefix_len == len(child.token_id_key):
                     return prefix_len + self._insert_helper(child, key[prefix_len:], value[prefix_len:])
@@ -266,11 +353,13 @@ class RadixCache:
                 self.tree_total_tokens_num.arr[0] += len(new_node.token_mem_index_value)
                 if new_node.is_leaf():
                     self.evict_tree_set.add(new_node)
+                    self.free_tree_set.add(new_node)
                 return 0
         finally:
             node.update_time()
             if node.is_leaf():
                 self.evict_tree_set.add(node)
+                self.free_tree_set.add(node)
 
     def match_prefix(self, key, update_refs=False):
         assert len(key) != 0
@@ -279,6 +368,7 @@ class RadixCache:
         if tree_node != self.root_node:
             if len(ans_value_list) != 0:
                 value = torch.concat(ans_value_list)
+                self.resume_from_cpu(tree_node)
             else:
                 value = torch.zeros((0,), device="cpu", dtype=self._value_dtype)
             return tree_node, len(value), value
@@ -289,6 +379,7 @@ class RadixCache:
     def _match_prefix_helper(self, node: TreeNode, key, ans_value_list: list, update_refs=False) -> TreeNode:
         if node.is_leaf():
             self.evict_tree_set.discard(node)
+            self.free_tree_set.discard(node)
 
         if update_refs:
             node.ref_counter += 1
@@ -312,6 +403,7 @@ class RadixCache:
                 elif prefix_len < len(child.token_id_key):
                     if child.is_leaf():
                         self.evict_tree_set.discard(child)
+                        self.free_tree_set.discard(child)
 
                     split_parent_node = child.split_node(prefix_len)
                     ans_value_list.append(split_parent_node.token_mem_index_value)
@@ -324,8 +416,10 @@ class RadixCache:
 
                     if child.is_leaf():
                         self.evict_tree_set.add(child)
+                        self.free_tree_set.add(child)
                     if split_parent_node.is_leaf():
                         self.evict_tree_set.add(split_parent_node)
+                        self.free_tree_set.add(split_parent_node)
 
                     return split_parent_node
                 else:
@@ -334,6 +428,30 @@ class RadixCache:
             node.update_time()
             if node.is_leaf():
                 self.evict_tree_set.add(node)
+                self.free_tree_set.add(node)
+
+    def _offload_helper(self, mem_idx, off_len):
+        off_idx = self.cpu_mem_manager.offload(mem_idx)
+        self.mem_manager.free(mem_idx)
+        start = 0
+        off_idx_list = []
+        for l in off_len:
+            end = start + l
+            off_idx_list.append(off_idx[start:end])
+            start = end
+        return off_idx_list
+    
+    def offload_to_cpu(self, nodes: List[TreeNode]):
+        mem_idx = []
+        for node in nodes:
+            idx = node.token_mem_index_value
+            mem_idx.append(idx)
+        mem_idx = torch.concat(mem_idx).cuda()
+        off_idx = self._offload_helper(mem_idx)
+        for node, idx in zip(nodes, off_idx):
+            with modify_object_in_sets([self.coldhot_evict_queue, self.evict_tree_set, self.free_tree_set], node) as node:
+                node.token_mem_index_value = idx
+                node.mem_type = MemoryType.CPU
 
     def evict(self, need_remove_tokens, evict_callback):
         if self.tree_total_tokens_num.arr[0] - self.refed_tokens_num.arr[0] < need_remove_tokens:
@@ -341,6 +459,7 @@ class RadixCache:
                               tree_total_tokens_num {self.tree_total_tokens_num.arr[0]},
                               refed_tokens_num {self.refed_tokens_num.arr[0]}"""
         num_evicted = 0
+        offload_nodes = []
         while num_evicted < need_remove_tokens:
             node: TreeNode = self.evict_tree_set.pop(0)
             assert (
@@ -349,14 +468,18 @@ class RadixCache:
             num_evicted += len(node.token_mem_index_value)
             evict_callback(node.token_mem_index_value)
             # update total token num
-            self.tree_total_tokens_num.arr[0] -= len(node.token_mem_index_value)
+            assert node.mem_type == MemoryType.GPU, "the node should be in GPU"
+            node.mem_type = MemoryType.CPU
             parent_node: TreeNode = node.parent
-            parent_node.remove_child(node)
-            if parent_node.is_leaf():
-                self.evict_tree_set.add(parent_node)
+            # parent_node.remove_child(node)
+            # if parent_node.is_leaf():
+            #     self.evict_tree_set.add(parent_node)
 
             # 回收 shared 链表资源
-            self.shared_idx_manager.free(node.shared_idx_node.get_idx())
+            # not need to free the shared idx node, because it will be reused as CPU nodes 
+            # self.shared_idx_manager.free(node.shared_idx_node.get_idx())
+            offload_nodes.append(node)
+        self.offload_to_cpu(offload_nodes)
         return
 
     def clear_tree_nodes(self):
@@ -393,6 +516,9 @@ class RadixCache:
     def get_tree_total_tokens_num(self):
         return self.tree_total_tokens_num.arr[0]
 
+    def get_tree_currenct_capacity(self):
+        return self.tree_capacity - self.get_tree_total_tokens_num()
+
     def print_self(self, indent=0):
         self._print_helper(self.root_node, indent)
 
@@ -400,7 +526,7 @@ class RadixCache:
         print(
             " " * indent,
             f"shared_idx: {node.shared_idx_node.get_idx()} p_idx: {node.shared_idx_node.get_parent_idx()} \
-            refs: {node.ref_counter} hot_refs: {node.hot_counter} \
+            refs: {node.ref_counter} hot_refs: {node.hot_counter} mem_type: {node.mem_type} \
             time_id: {node.time_id} prefix_total_len: {node.shared_idx_node.get_node_prefix_total_len()} \
             node_value_len: {node.shared_idx_node.get_node_value_len()}",
         )
@@ -410,6 +536,7 @@ class RadixCache:
         return
 
     def free_radix_cache_to_get_enough_token(self, need_token_num):
+        # free gpu memory
         assert self.mem_manager is not None
         self._cold_hot_evict()
         if need_token_num > self.mem_manager.can_use_mem_size:
@@ -424,6 +551,58 @@ class RadixCache:
             mem_index = torch.concat(release_mems)
             self.mem_manager.free(mem_index.cuda())
         return
+    
+
+
+    def free(self, token_num, free_callback):
+        if self.tree_total_tokens_num.arr[0] - self.refed_tokens_num.arr[0] < token_num:
+            assert False, f"""can not free tree tokens {token_num},
+                              tree_total_tokens_num {self.tree_total_tokens_num.arr[0]},
+                              refed_tokens_num {self.refed_tokens_num.arr[0]}"""
+        num_evicted = 0
+
+        while num_evicted < token_num:
+            node: TreeNode = self.free_tree_set.pop(0)
+            assert (
+                node.ref_counter == 0 and len(node.children) == 0 and node != self.root_node
+            ), "error evict tree node state"
+            num_evicted += len(node.token_mem_index_value)
+            free_callback(node.token_mem_index_value, node.mem_type == MemoryType.CPU)
+            # update total token num
+            self.tree_total_tokens_num.arr[0] -= len(node.token_mem_index_value)
+            parent_node: TreeNode = node.parent
+            parent_node.remove_child(node)
+            self.evict_tree_set.discard(node)
+            if parent_node.is_leaf():
+                self.evict_tree_set.add(parent_node)
+                self.free_tree_set.add(parent_node)
+
+            # 回收 shared 链表资源
+            self.shared_idx_manager.free(node.shared_idx_node.get_idx())
+        return
+
+
+
+
+    def free_radix_tree_to_get_enough_token(self, need_token_num):
+        # free cpu memory, might remove some tree nodes.
+        self._cold_hot_evict()
+        if need_token_num > self.get_tree_currenct_capacity():
+            need_evict_token_num = need_token_num - self.get_tree_currenct_capacity()
+            
+            cpu_mems = []
+            gpu_mems = []
+            def release_mem(mem_index, is_cpu):
+                cpu_mems.append(mem_index) if is_cpu else gpu_mems.append(mem_index)
+
+            self.free(need_evict_token_num, release_mem)
+            gpu_mem_index = torch.concat(gpu_mems).cuda()
+            cpu_mem_index = torch.concat(cpu_mems)
+            # free the cpu memory 
+            self.cpu_mem_manager.free(cpu_mem_index)
+            # free the gpu memory 
+            self.mem_manager.free(gpu_mem_index)
+
 
 
 class RadixCacheReadOnlyClient:
