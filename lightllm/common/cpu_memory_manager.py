@@ -4,12 +4,14 @@ import torch
 from transformers.utils.generic import np
 
 from lightllm.common.basemodel.triton_kernel.destindex_copy_kv import \
-    destindex_copy_quantize_kv as scatter_kv
+    destindex_copy_kv as scatter_kv
 from lightllm.common.basemodel.triton_kernel.destindex_copy_kv import \
     srcindex_copy_kv as gather_kv
 from lightllm.common.mem_manager import MemoryManager
 from lightllm.server.router.dynamic_prompt.shared_arr import SharedArray
+from lightllm.utils.log_utils import init_logger
 
+logger = init_logger(__name__)
 
 class CPUMemoryManager:
     def __init__(self, mem_manager: MemoryManager, size: int, mov_buf_size: int):
@@ -44,6 +46,9 @@ class CPUMemoryManager:
 
 
     def alloc(self, need_size: int):
+        if need_size > self.cpu_can_use_mem_size:
+            logger.warn(f"warn no enough cache need_size {need_size} left_size {self.cpu_can_use_mem_size}")
+            return None
         can_use_index = torch.nonzero(self.cpu_mem_state == 0).view(-1)
         select_index = can_use_index[0:need_size]
         self.cpu_mem_state[select_index] = 1
@@ -70,7 +75,10 @@ class CPUMemoryManager:
                 # destindex_copy_kv(self.mem_manager.kv_buffer[i], src_idx[start:end], self.gpu_kv_buf[:end - start])
                 gather_kv(self.mem_manager.kv_buffer[i], src_idx[start:end], self.gpu_kv_buf[:end - start])
                 self.cpu_kv_buf[:end - start].copy_(self.gpu_kv_buf[:end - start])
-                self.cpu_kv_pool[i][dst_idx[start:end]] = self.cpu_kv_buf[:end - start]
+                src_shape = self.cpu_kv_buf[:end - start].shape
+                dst_shape = self.cpu_kv_pool[i][dst_idx[start:end]].shape
+                # print(f'src_shape: {src_shape}, dst_shape: {dst_shape}, pool_size: {self.cpu_kv_pool[i].shape}, idx" {dst_idx}, slice: {dst_idx[start:end]}, j={j}')
+                self.cpu_kv_pool[i][dst_idx[start:end]].copy_(self.cpu_kv_buf[:end - start])
             self.shared_layer_indicators.arr[i] = 1
         return dst_idx 
 
