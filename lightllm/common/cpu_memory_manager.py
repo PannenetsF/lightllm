@@ -78,7 +78,8 @@ class CPUMemoryManager:
                 src_shape = self.cpu_kv_buf[:end - start].shape
                 dst_shape = self.cpu_kv_pool[i][dst_idx[start:end]].shape
                 # print(f'src_shape: {src_shape}, dst_shape: {dst_shape}, pool_size: {self.cpu_kv_pool[i].shape}, idx" {dst_idx}, slice: {dst_idx[start:end]}, j={j}')
-                self.cpu_kv_pool[i][dst_idx[start:end]].copy_(self.cpu_kv_buf[:end - start])
+                self.cpu_kv_pool[i][dst_idx[:end - start]] = self.cpu_kv_buf[:end - start]
+                err = (self.cpu_kv_pool[i][dst_idx[:end - start]].clone().detach() - self.mem_manager.kv_buffer[i][src_idx[start:end]].clone().detach().cpu()).abs().sum()
             self.shared_layer_indicators.arr[i] = 1
         return dst_idx 
 

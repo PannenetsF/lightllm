@@ -641,6 +641,7 @@ class RadixCache:
 
     def __repr__(self):
         return self.print_tree(self.root_node)
+
     def print_self(self, indent=0):
         self._print_helper(self.root_node, indent)
 
@@ -685,7 +686,6 @@ class RadixCache:
 
         while num_evicted < token_num:
             node: TreeNode = self.free_tree_set.pop(0)
-            print(f'try to free : {node}')
             assert (
                 node.ref_counter == 0 and len(node.children) == 0 and node != self.root_node
             ), "error evict tree node state"
