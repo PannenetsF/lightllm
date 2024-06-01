@@ -301,7 +301,7 @@ class InferBatch:
         else:
             key = torch.tensor(req.input_token_ids[0 : req.cur_kv_len], dtype=torch.int64, device="cpu")
             value = self.req_manager.req_to_token_indexs[req.req_idx][: req.cur_kv_len].detach().cpu()
-            prefix_len = self.radix_cache.insert(key, value)
+            prefix_len, _tail_node = self.radix_cache.insert(key, value)
             self.radix_cache.keep_session(req.session_id, key)
             free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][:prefix_len])
             if req.shared_kv_node is not None:

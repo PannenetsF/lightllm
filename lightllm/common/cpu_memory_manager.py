@@ -1,9 +1,10 @@
 import os
 
 import torch
+from transformers.utils.generic import np
 
 from lightllm.common.basemodel.triton_kernel.destindex_copy_kv import \
-    destindex_copy_quantize_kv() as scatter_kv
+    destindex_copy_quantize_kv as scatter_kv
 from lightllm.common.basemodel.triton_kernel.destindex_copy_kv import \
     srcindex_copy_kv as gather_kv
 from lightllm.common.mem_manager import MemoryManager
@@ -20,7 +21,7 @@ class CPUMemoryManager:
         
         nccl_port = os.environ.get("_NCCL_PORT_", None)
         assert nccl_port is not None
-        self.shared_layer_indicators = SharedArray(f"{str(nccl_port)}_cpu_mem_manger_layer_indicators", (mem_manager.layer_num,), dtype=torch.int32)
+        self.shared_layer_indicators = SharedArray(f"{str(nccl_port)}_cpu_mem_manger_layer_indicators", (mem_manager.layer_num,), dtype=np.int32)
         self._init_buffers(size, mov_buf_size)
 
     def _init_buffers(self, pool_size, buf_size):
@@ -55,7 +56,7 @@ class CPUMemoryManager:
         self.cpu_mem_state[free_index] = 0
 
     def _clear_indicators(self):
-        self.shared_layer_indicators.arr.fill_(0)
+        self.shared_layer_indicators.arr.fill(0)
 
     def offload(self, src_idx):
         # from gpu to cpu
