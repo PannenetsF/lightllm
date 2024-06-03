@@ -69,6 +69,7 @@ class ModeBackend:
 
         self.weight_dir = kvargs["weight_dir"]
         max_total_token_num = kvargs["max_total_token_num"]
+        max_total_cpu_token_num = kvargs["max_total_cpu_token_num"]
 
         dist.init_process_group(
             "nccl", init_method=f'tcp://127.0.0.1:{kvargs["nccl_port"]}', rank=self.tp_rank, world_size=world_size
@@ -183,7 +184,7 @@ class ModeBackend:
         set_random_seed(2147483647)
 
         self.radix_cache = (
-            RadixCache(str(kvargs["nccl_port"]), max_total_token_num, self.tp_rank, mem_manager=self.model.mem_manager)
+            RadixCache(str(kvargs["nccl_port"]), max_total_token_num, max_total_cpu_token_num, self.tp_rank, mem_manager=self.model.mem_manager)
             if self.use_dynamic_prompt_cache
             else None
         )

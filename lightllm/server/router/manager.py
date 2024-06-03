@@ -38,12 +38,13 @@ class RouterManager:
         self.load_way = args.load_way
         self.mode = args.mode
         self.max_total_token_num = args.max_total_token_num
+        self.max_total_cpu_token_num = args.max_total_cpu_token_num
         # 用共享内存进行共享，router 模块读取进行精确的调度估计
         self.shared_can_use_token_num = SharedInt(f"{args.nccl_port}_mem_manger_can_use_token_num")
         # 初始化 radix_cache_client 用于读取 prompt cache 的管理信息
         self.radix_cache_client = None
         if self.args.use_dynamic_prompt_cache:
-            self.radix_cache_client = RadixCacheReadOnlyClient(str(args.nccl_port), self.max_total_token_num, tp_id=0)
+            self.radix_cache_client = RadixCacheReadOnlyClient(str(args.nccl_port), self.max_total_token_num , self.max_total_cpu_token_num, tp_id=0)
 
         # 共享变量，用于存储router端调度分析得到的机器负载信息
         self.shared_token_load = TokenLoad(f"{str(args.nccl_port)}_shared_token_load")
@@ -86,6 +87,7 @@ class RouterManager:
                 "weight_dir": self.model_weightdir,
                 "load_way": self.load_way,
                 "max_total_token_num": self.max_total_token_num,
+                "max_total_cpu_token_num": self.max_total_cpu_token_num,
                 "mode": self.mode,
                 "max_req_num": self.args.running_max_req_size + 8,
                 "max_seq_length": self.args.max_req_total_len + 8,  # 留一点余量

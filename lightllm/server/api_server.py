@@ -313,6 +313,12 @@ def main():
         help="the total token nums the gpu and model can support, equals = max_batch * (input_len + output_len)",
     )
     parser.add_argument(
+        "--max_total_cpu_token_num",
+        type=int,
+        default=6000,
+        help="the total token nums the cpu can hold, which is only used for dynamic_prompt_cache mode",
+    )
+    parser.add_argument(
         "--batch_max_tokens",
         type=int,
         default=None,
