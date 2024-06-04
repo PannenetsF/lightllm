@@ -58,9 +58,6 @@ class CPUMemoryManager:
     def free(
         self, free_index: torch.Tensor
         ):
-        if not (self.cpu_mem_state[free_index] > 0).all(): 
-            non_zero_idx = torch.nonzero(self.cpu_mem_state[free_index] > 0).view(-1)
-            print(1)
         self.cpu_mem_state[free_index] = 0
         self.cpu_can_use_mem_size += free_index.shape[0]
 

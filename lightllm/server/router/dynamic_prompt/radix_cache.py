@@ -95,7 +95,6 @@ class MemoryType(Enum):
 
 class TreeNode:
     def __init__(self, shared_idx_manager):
-        self._belonged_set = []
         self.shared_idx_manager: SharedLinkedListManager = shared_idx_manager
         self.children = {}  # 这里的键 为 token_id_key 的第一个元素
         self.parent: TreeNode = None
@@ -108,13 +107,6 @@ class TreeNode:
         self.hot_counter = 0 # used to record the hot degree of the node, if the node is hot, it cannot be evicted
         self.evict_time: float = -1
         self.mem_type = MemoryType.NOT_VALID
-
-    def __setattr__(self, name, value):
-        # raise error, when the node is in some set 
-        if hasattr(self, '_belonged_set'):
-            if len(self._belonged_set) != 0:
-                raise ValueError("the node is in some set, cannot be modified")
-        super().__setattr__(name, value)
 
     def __repr__(self):
         return f"TreeNode({self.token_id_key}, {self.mem_type})"
@@ -278,11 +270,10 @@ class RadixCache:
         self.root_node.hot_counter = 1  # 初始化为 1 保证永远不会被 evict 掉
         self.root_node.mem_type = MemoryType.GPU # root node is always in GPU, or its children cannot be in GPU
 
-        # self.evict_tree_set = SortedSet(key=lambda x: x.get_compare_key())  # 自定义比较器
-        self.evict_tree_set = WrappedSortedSet(key=lambda x: x.get_compare_key(), checker=lambda x: x.is_leaf())  # 自定义比较器
+        self.evict_tree_set = SortedSet(key=lambda x: x.get_compare_key())
         self.evict_tree_set.add(self.root_node)
 
-        self.free_tree_set = WrappedSortedSet(key=lambda x: x.get_free_compare_key(), checker=lambda x: x.is_radix_leaf())  # used to free the tree nodes
+        self.free_tree_set = SortedSet(key=lambda x: x.get_free_compare_key())
         self.free_tree_set.add(self.root_node)
 
         self.refed_tokens_num = SharedArray(f"{unique_name}_refed_tokens_num_{tp_id}", (1,), dtype=np.int64)
@@ -293,7 +284,7 @@ class RadixCache:
 
         self.session2leaf = {} # track the session id to the leaf node
         self.leaf2session = {}
-        self.coldhot_evict_queue = WrappedSortedSet(key=lambda x: x.evict_time)
+        self.coldhot_evict_queue = SortedSet(key=lambda x: x.evict_time)
 
 
     def _update_session_info(self, src, tgt):
@@ -312,7 +303,7 @@ class RadixCache:
 
     def _set_eviction_time(self, leaf_node: TreeNode, now: float, interval: float):
         node = leaf_node
-        self.valid_fucking_sets()
+        # self.valid_fucking_sets()
         while node is not self.root_node:
             with modify_object_in_sets([self.coldhot_evict_queue, self.evict_tree_set, self.free_tree_set], node) as node:
                 if node.evict_time < 0:
@@ -322,13 +313,13 @@ class RadixCache:
                 node.hot_counter += 1
             self.coldhot_evict_queue.add(node)
             node = node.parent
-        self.valid_fucking_sets()
+        # self.valid_fucking_sets()
 
 
 
     def _cold_hot_evict(self):
         # self.valid()
-        self.valid_fucking_sets()
+        # self.valid_fucking_sets()
         now = time.time()
         cold_nodes = []
         for node in self.coldhot_evict_queue:
@@ -349,7 +340,7 @@ class RadixCache:
             if node.is_radix_leaf():
                 self.free_tree_set.add(node)
         # self.valid()
-        self.valid_fucking_sets()
+        # self.valid_fucking_sets()
 
     def _resume_helper(self, resume_idx, resume_len, nodes):
         # though resuming has different cases 
@@ -358,7 +349,7 @@ class RadixCache:
         #   3. swap 
         # there is no need to consider too many case in real application, as the corner case is rare
         # so we just consider the case 1 and 2
-        self.valid_fucking_sets()
+        # self.valid_fucking_sets()
         if self.mem_manager.can_use_mem_size >= resume_idx.shape[0]:
             # case 1 
             gpu_alloc_idx = self.mem_manager.alloc(resume_idx.shape[0])
@@ -392,7 +383,7 @@ class RadixCache:
             end = start + l
             gpu_idx_list.append(gpu_alloc_idx[start:end])
             start = end
-        self.valid_fucking_sets()
+        # self.valid_fucking_sets()
         return gpu_idx_list
 
         # if self.mem_manager.can_use_mem_size < resume_idx.shape[0]:
@@ -415,8 +406,8 @@ class RadixCache:
         # 
         #
     def resume_from_cpu(self, leaf_node: TreeNode):
-        self.valid_fucking_sets()
-        self.check_gpu_token()
+        # self.valid_fucking_sets()
+        #self.check_gpu_token()
         node: TreeNode = leaf_node 
         resume_idx = []
         resume_len = []
@@ -433,16 +424,16 @@ class RadixCache:
             node = node.parent
         if len(resume_idx) == 0:
             return
-        self.valid_fucking_sets()
+        # self.valid_fucking_sets()
         print(f'real resume from {nodes} for {leaf_node}', flush=True)
         resume_len = torch.tensor(resume_len) 
         resume_idx = torch.concat(resume_idx)
         # self.valid()
-        self.valid_fucking_sets()
-        self.check_gpu_token()
-        self.check_gpu_token()
+        # self.valid_fucking_sets()
+        #self.check_gpu_token()
+        #self.check_gpu_token()
         gpu_idx_list = self._resume_helper(resume_idx, resume_len, nodes)
-        self.valid_fucking_sets()
+        # self.valid_fucking_sets()
         # self.valid()
         for node, gpu_idx in zip(nodes, gpu_idx_list):
             with modify_object_in_sets([self.coldhot_evict_queue, self.evict_tree_set, self.free_tree_set], node) as node:
@@ -458,29 +449,29 @@ class RadixCache:
                 self.evict_tree_set.add(node)
         filter_set(self.evict_tree_set, lambda x: x.is_leaf())
         filter_set(self.free_tree_set, lambda x: x.is_radix_leaf())
-        self.valid_fucking_sets()
+        # self.valid_fucking_sets()
 
 
 
 
     def insert(self, key, value=None):
-        self.check_gpu_token()
+        #self.check_gpu_token()
         if value is None:
             value = key
 
         assert len(key) == len(value) and len(key) >= 1, f'len_key = {len(key)} len_value = {len(value)}'
-        self.valid_fucking_sets()
+        # self.valid_fucking_sets()
         self._cold_hot_evict()
-        self.valid_fucking_sets()
-        self.check_nodes()
+        # self.valid_fucking_sets()
+        # self.check_nodes()
         print(f'before insert {key}', flush=True)
         print(self, flush=True)
         # self.valid()
-        self.valid_fucking_sets()
+        # self.valid_fucking_sets()
         if key.shape[0] == 42:
             print(1)
         prefil_len, tail_node = self._insert_helper(self.root_node, key, value)
-        self.valid_fucking_sets()
+        # self.valid_fucking_sets()
         print(f'after insert {key}', flush=True)
         print(self, flush=True)
         # self.valid()
@@ -489,7 +480,7 @@ class RadixCache:
 
         print(f'after resume {key}', flush=True)
         print(self, flush=True)
-        self.check_gpu_token()
+        #self.check_gpu_token()
         return prefil_len, tail_node 
 
     def _insert_helper(self, node: TreeNode, key, value):
@@ -641,21 +632,21 @@ class RadixCache:
                         assert False
 
     def match_prefix(self, key, update_refs=False):
-        self.check_gpu_token()
+        #self.check_gpu_token()
         ans_value_list = []
         ans_node_list = []
 
         # self.valid()
-        self.valid_fucking_sets()
+        # self.valid_fucking_sets()
         tree_node = self._match_prefix_helper(self.root_node, key, ans_node_list, update_refs=update_refs)
-        self.valid_fucking_sets()
+        # self.valid_fucking_sets()
         # self.valid()
         if tree_node != self.root_node:
             if len(ans_node_list) != 0:
                 print(f'the tree node is {tree_node}, before resume', flush=True)
-                self.valid_fucking_sets()
+                # self.valid_fucking_sets()
                 self.resume_from_cpu(tree_node)
-                self.valid_fucking_sets()
+                # self.valid_fucking_sets()
                 ans_value_list = [node.token_mem_index_value for node in ans_node_list]
                 try:
                     value = torch.concat(ans_value_list)
@@ -668,11 +659,11 @@ class RadixCache:
                     raise e
             else:
                 value = torch.zeros((0,), device="cpu", dtype=self._value_dtype)
-            self.check_gpu_token()
+            #self.check_gpu_token()
             return tree_node, len(value), value
         else:
             self.dec_node_ref_counter(self.root_node)
-            self.check_gpu_token()
+            #self.check_gpu_token()
             return None, 0, None
 
     def _match_prefix_helper(self, node: TreeNode, key, ans_node_list: list, update_refs=False) -> TreeNode:
@@ -815,12 +806,12 @@ class RadixCache:
         return
 
     def evict(self, need_remove_tokens, evict_callback, do_offload=True):
-        self.check_gpu_token()
+        #self.check_gpu_token()
         if self.tree_total_tokens_num.arr[0] - self.refed_tokens_num.arr[0] < need_remove_tokens:
             assert False, f"""can not free tree tokens {need_remove_tokens},
                               tree_total_tokens_num {self.tree_total_tokens_num.arr[0]},
                               refed_tokens_num {self.refed_tokens_num.arr[0]}"""
-        self.valid_fucking_sets()
+        # self.valid_fucking_sets()
         num_evicted = 0
         offload_nodes = []
         while num_evicted < need_remove_tokens:
@@ -849,9 +840,9 @@ class RadixCache:
         for node in offload_nodes:
             if node.parent.is_leaf():
                 self.evict_tree_set.add(node.parent)
-        self.check_nodes()
-        self.check_gpu_token()
-        self.valid_fucking_sets()
+        # self.check_nodes()
+        #self.check_gpu_token()
+        # self.valid_fucking_sets()
         return
 
     def check_gpu_token(self):
@@ -950,9 +941,9 @@ class RadixCache:
     def free_radix_cache_to_get_enough_token(self, need_token_num, do_offload=True):
         # free gpu memory
         assert self.mem_manager is not None
-        self.valid_fucking_sets()
+        # self.valid_fucking_sets()
         self._cold_hot_evict()
-        self.valid_fucking_sets()
+        # self.valid_fucking_sets()
         if need_token_num > self.mem_manager.can_use_mem_size:
             need_evict_token_num = need_token_num - self.mem_manager.can_use_mem_size
             release_mems = []
@@ -961,16 +952,16 @@ class RadixCache:
                 release_mems.append(mem_index)
                 return
 
-            self.valid_fucking_sets()
+            # self.valid_fucking_sets()
             self.evict(need_evict_token_num, release_mem, do_offload)
-            self.valid_fucking_sets()
+            # self.valid_fucking_sets()
             mem_index = torch.concat(release_mems)
         return
     
 
 
     def free(self, token_num, free_callback, kept=[]):
-        self.check_gpu_token()
+        #self.check_gpu_token()
         # if self.tree_total_tokens_num.arr[0] - self.refed_tokens_num.arr[0] < token_num:
         #     assert False, f"""can not free tree tokens {token_num},
         #                       tree_total_tokens_num {self.tree_total_tokens_num.arr[0]},
@@ -1001,8 +992,8 @@ class RadixCache:
             self.shared_idx_manager.free(node.shared_idx_node.get_idx())
         for node in tmp_pop:
             self.free_tree_set.add(node)
-        self.check_nodes()
-        self.check_gpu_token()
+        # self.check_nodes()
+        #self.check_gpu_token()
         return
 
 
