@@ -40,6 +40,8 @@ class MemoryManager:
 
     @torch.no_grad()
     def alloc(self, need_size):
+        if need_size == 39:
+            print(1)
         if need_size > self.can_use_mem_size:
             logger.warn(f"warn no enough cache need_size {need_size} left_size {self.can_use_mem_size}")
             return None
@@ -50,6 +52,9 @@ class MemoryManager:
 
     @torch.no_grad()
     def alloc_contiguous(self, need_size):
+        if need_size == 39:
+            print(1)
+
         if self.always_copy:
             return None
         if need_size > self.can_use_mem_size:
@@ -97,6 +102,8 @@ class MemoryManager:
     def decrease_refs(self, token_index: torch.Tensor):
         token_index, counts = token_index.unique(return_counts=True)
         self.mem_state[token_index] -= counts
+        if torch.any(self.mem_state[token_index] < 0):
+            print(1)
         state = self.mem_state[token_index]
         used_tokens = torch.count_nonzero(state).item()
         all_tokens = len(state)

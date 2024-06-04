@@ -62,6 +62,8 @@ def prepare_prefill_inputs(batch: InferBatch, radix_cache: RadixCache, is_multim
 
     # dynamic prompt cache 准备 token
     if radix_cache is not None:
+        if input_ids.shape[0] == 39:
+            print(1)
         radix_cache.free_radix_cache_to_get_enough_token(input_ids.shape[0])
 
     return kwargs, run_reqs
@@ -108,6 +110,8 @@ def prepare_decode_inputs(batch: InferBatch, radix_cache: RadixCache):
     }
     # dynamic prompt cache 准备 token
     if radix_cache is not None:
+        if input_ids.shape[0] == 39:
+            print(1)
         radix_cache.free_radix_cache_to_get_enough_token(input_ids.shape[0])
 
     return kwargs, run_reqs

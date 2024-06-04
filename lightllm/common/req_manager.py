@@ -26,6 +26,13 @@ class ReqManager:
             logger.debug(f"freed all request size {self.can_use_req_size}")
         self.mem_manager.free(free_token_index)
     
+    def try_free_req(self, free_req_index):
+        if self.req_state[free_req_index] == 0:
+            return
+        self.can_use_req_size +=1
+        self.req_state[free_req_index] = 0
+        return
+
     def free_req(self, free_req_index):
         self.can_use_req_size +=1
         self.req_state[free_req_index] = 0

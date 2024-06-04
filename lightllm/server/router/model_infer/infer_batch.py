@@ -277,6 +277,7 @@ class InferBatch:
                     key = key[0 : len(key) - 1]  # 最后一个不需要，因为需要一个额外的token，让其在prefill的时候输出下一个token的值
                     share_node, kv_len, value_tensor = radix_cache.match_prefix(key, update_refs=True)
                     if share_node is not None:
+                        print(f'find match node {share_node} for key = {key}')
                         r_obj.shared_kv_node = share_node
                         ready_cache_len = share_node.shared_idx_node.get_node_prefix_total_len()
                         mem_manager: MemoryManager = req_manager.mem_manager
@@ -299,19 +300,30 @@ class InferBatch:
         if self.radix_cache is None:
             free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][: req.cur_kv_len])
         else:
+            print(self.radix_cache)
             key = torch.tensor(req.input_token_ids[0 : req.cur_kv_len], dtype=torch.int64, device="cpu")
-            value = self.req_manager.req_to_token_indexs[req.req_idx][: req.cur_kv_len].detach().cpu()
             value = self.req_manager.req_to_token_indexs[req.req_idx][: req.cur_kv_len].detach().clone()
-            prefix_len, _tail_node = self.radix_cache.insert(key, value)
+            if key.shape[0] == 42:
+                print(1)
+            prefix_len, _ = self.radix_cache.insert(key, value)
             self.radix_cache.keep_session(req.session_id, key)
             free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][:prefix_len])
             if req.shared_kv_node is not None:
-                assert req.shared_kv_node.shared_idx_node.get_node_prefix_total_len() <= prefix_len
+                print('the inserted node and prefix node ', req.shared_kv_node, _, flush=True)
                 self.radix_cache.dec_node_ref_counter(req.shared_kv_node)
+                assert req.shared_kv_node.shared_idx_node.get_node_prefix_total_len() <= prefix_len, f'prefil_len is {prefix_len}, but find {req.shared_kv_node.shared_idx_node.get_node_prefix_total_len()}'
                 req.shared_kv_node = None
 
     @torch.no_grad()
     def free_self(self):
+        if self.radix_cache is not None:
+            logger.info(
+                f"before free a batch state:\n"
+                f"radix refed token num {self.radix_cache.get_refed_tokens_num()}\n"
+                f"radix hold token num {self.radix_cache.get_tree_total_tokens_num()}\n"
+                f"mem manager can alloc token num {self.req_manager.mem_manager.can_use_mem_size}\n"
+                f"mem manager total size {self.req_manager.mem_manager.size}"
+            )
         free_req_index = []
         free_token_index = []
         for request_id in self.request_ids:
@@ -333,6 +345,7 @@ class InferBatch:
             group_mapping.clear()
 
         if self.radix_cache is not None:
+            self.radix_cache.check_nodes()
             logger.info(
                 f"free a batch state:\n"
                 f"radix refed token num {self.radix_cache.get_refed_tokens_num()}\n"

@@ -16,7 +16,11 @@ class SharedArray:
             shm = shared_memory.SharedMemory(name=name, create=False, size=np.prod(shape) * dtype_byte_num)
             print(f"link shm {name}")
         self.shm = shm  # SharedMemory 对象一定要被持有，否则会被释放
+        print(f'request shape = {shape}, dtype = {dtype}, buf_size = {np.prod(shape) * dtype_byte_num}')
         self.arr = np.ndarray(shape, dtype=dtype, buffer=self.shm.buf)
+
+    def __repr__(self):
+        return f"SharedArray({self.arr})"
 
 class SharedInt(SharedArray):
     def __init__(self, name):
